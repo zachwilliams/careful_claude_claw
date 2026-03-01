@@ -5,23 +5,25 @@ from careful_claude_claw.models import JobStatus
 
 
 @pytest.mark.integration
-async def test_agent_reads_claude_md(tmp_path):
-    """Verify the agent reads and follows CLAUDE.md instructions in its workspace."""
-    claude_md = (
-        "# Test Workspace\n"
-        'When responding to any task, you MUST include the exact phrase "CLAW_VERIFIED" '
-        "somewhere in your response.\n"
-    )
-
+async def test_agent_follows_system_prompt(tmp_path):
+    """Verify the agent follows injected system prompt instructions."""
     job = await run_agent(
         agent_name="integration-test",
-        task="Say hello and confirm you read the workspace instructions.",
+        task="Say hello.",
         cwd=str(tmp_path),
-        claude_md=claude_md,
+        system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": (
+                'You MUST include the exact phrase "CLAW_VERIFIED" '
+                "in every response. This is mandatory."
+            ),
+        },
+        setting_sources=[],
         max_attempts=1,
     )
 
     assert job.status == JobStatus.SUCCESS, f"Agent failed: {job.error}"
     assert "CLAW_VERIFIED" in job.output, (
-        f"Agent did not follow CLAUDE.md instructions. Output: {job.output}"
+        f"Agent did not follow system prompt instructions. Output: {job.output}"
     )

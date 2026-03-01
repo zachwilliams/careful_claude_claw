@@ -18,7 +18,7 @@ DEFAULT_TASK = "List all the active MCP connections you have."
 
 def prepare_workspace(cwd: str|None, claude_md: str | None = None) -> Path:
     """Create workspace directory and optionally seed it with a CLAUDE.md file."""
-    workspace = Path(cwd) if cwd else Path.cwd().joinpath("/workspace")
+    workspace = Path(cwd) if cwd else Path.cwd() / "workspace"
 
     workspace.mkdir(parents=True, exist_ok=True)
     if claude_md is not None:
@@ -33,6 +33,8 @@ async def run_agent(
     backoff_seconds: int = 30,
     cwd: str | None = None,
     claude_md: str | None = None,
+    system_prompt: str | dict | None = None,
+    setting_sources: list[str] | None = None,
 ) -> Job:
     """Spawn a Claude agent for the given task, with retry on failure."""
     cwd = str(prepare_workspace(cwd, claude_md))
@@ -52,13 +54,19 @@ async def run_agent(
 
         try:
             result_text: str | None = None
+            opts = ClaudeAgentOptions(
+                cwd=cwd,
+                allowed_tools=["Read", "Glob", "Grep"],
+                max_turns=10,
+            )
+            if system_prompt is not None:
+                opts.system_prompt = system_prompt
+            if setting_sources is not None:
+                opts.setting_sources = setting_sources
+
             async for message in query(
                 prompt=task,
-                options=ClaudeAgentOptions(
-                    cwd=cwd,
-                    allowed_tools=["Read", "Glob", "Grep"],
-                    max_turns=10,
-                ),
+                options=opts,
             ):
                 if isinstance(message, ResultMessage):
                     result_text = message.result
