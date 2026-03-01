@@ -20,10 +20,9 @@ def cli() -> None:
 @cli.command()
 @click.option("--task", default=DEFAULT_TASK, help="Task for the agent to execute.")
 @click.option("--agent-name", default="demo", help="Name to identify this agent.")
-@click.option("--cwd", default=None, help="Working directory for the agent.")
 @click.option("--max-attempts", default=2, help="Maximum retry attempts on failure.")
 @click.option("--backoff", default=5, help="Seconds to wait between retry attempts.")
-def run(task: str, agent_name: str, cwd: str | None, max_attempts: int, backoff: int) -> None:
+def run(task: str, agent_name: str, max_attempts: int, backoff: int) -> None:
     """Run a one-shot agent task and log the result to SQLite."""
     init_db()
     console.print(f"[bold cyan]Agent:[/bold cyan] {agent_name}")
@@ -37,7 +36,6 @@ def run(task: str, agent_name: str, cwd: str | None, max_attempts: int, backoff:
                 task=task,
                 max_attempts=max_attempts,
                 backoff_seconds=backoff,
-                cwd=cwd,
             )
         )
 
