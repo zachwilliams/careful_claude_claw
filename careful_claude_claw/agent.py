@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 from claude_agent_sdk import (
     CLIConnectionError,
@@ -12,10 +13,15 @@ from claude_agent_sdk import (
 from .db import insert_job, update_job
 from .models import Job, JobStatus
 
-DEFAULT_TASK = (
-    "List all Python source files in the current directory and briefly describe "
-    "each file's purpose based on its name and content."
-)
+DEFAULT_TASK = "List all the active MCP connections you have."
+
+
+def prepare_workspace(cwd: Path, claude_md: str | None = None) -> Path:
+    """Create workspace directory and optionally seed it with a CLAUDE.md file."""
+    cwd.mkdir(parents=True, exist_ok=True)
+    if claude_md is not None:
+        (cwd / "CLAUDE.md").write_text(claude_md)
+    return cwd
 
 
 async def run_agent(
@@ -24,8 +30,14 @@ async def run_agent(
     max_attempts: int = 2,
     backoff_seconds: int = 30,
     cwd: str | None = None,
+    claude_md: str | None = None,
 ) -> Job:
     """Spawn a Claude agent for the given task, with retry on failure."""
+    if claude_md is not None:
+        workspace = Path(cwd) if cwd else Path.cwd()
+        prepare_workspace(workspace, claude_md)
+        cwd = str(workspace)
+
     job = Job(
         agent_name=agent_name,
         task=task,

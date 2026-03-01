@@ -41,6 +41,7 @@ packages = ["careful_claude_claw"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["integration: requires live Claude CLI"]
 
 [tool.ruff]
 line-length = 100
