@@ -16,12 +16,14 @@ from .models import Job, JobStatus
 DEFAULT_TASK = "List all the active MCP connections you have."
 
 
-def prepare_workspace(cwd: Path, claude_md: str | None = None) -> Path:
+def prepare_workspace(cwd: str|None, claude_md: str | None = None) -> Path:
     """Create workspace directory and optionally seed it with a CLAUDE.md file."""
-    cwd.mkdir(parents=True, exist_ok=True)
+    workspace = Path(cwd) if cwd else Path.cwd().joinpath("/workspace")
+
+    workspace.mkdir(parents=True, exist_ok=True)
     if claude_md is not None:
-        (cwd / "CLAUDE.md").write_text(claude_md)
-    return cwd
+        (workspace / "CLAUDE.md").write_text(claude_md)
+    return workspace
 
 
 async def run_agent(
@@ -33,10 +35,7 @@ async def run_agent(
     claude_md: str | None = None,
 ) -> Job:
     """Spawn a Claude agent for the given task, with retry on failure."""
-    if claude_md is not None:
-        workspace = Path(cwd) if cwd else Path.cwd()
-        prepare_workspace(workspace, claude_md)
-        cwd = str(workspace)
+    cwd = str(prepare_workspace(cwd, claude_md))
 
     job = Job(
         agent_name=agent_name,
