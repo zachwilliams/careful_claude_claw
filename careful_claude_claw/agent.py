@@ -15,6 +15,8 @@ from .models import Job, JobStatus
 
 DEFAULT_TASK = "List all the active MCP connections you have."
 
+DEFAULT_ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
+
 
 async def run_agent(
     agent_name: str,
@@ -25,6 +27,7 @@ async def run_agent(
     system_prompt: str | dict | None = None,
     setting_sources: list[str] | None = None,
     project_name: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> Job:
     """Spawn a Claude agent for the given task, with retry on failure."""
     workspace = Path(cwd) if cwd else Path.cwd() / "workspace"
@@ -48,9 +51,10 @@ async def run_agent(
 
         try:
             result_text: str | None = None
+            tools = allowed_tools or DEFAULT_ALLOWED_TOOLS
             opts = ClaudeAgentOptions(
                 cwd=cwd,
-                allowed_tools=["Read", "Glob", "Grep"],
+                allowed_tools=tools,
                 max_turns=10,
             )
             if system_prompt is not None:

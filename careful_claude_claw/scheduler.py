@@ -25,6 +25,7 @@ async def _run_scheduled_task(
     task: str,
     skill_name: str | None,
     project_name: str | None,
+    allowed_tools: list[str] | None = None,
 ) -> None:
     """Execute a scheduled task by running an agent."""
     agent_name = f"sched-{schedule_name}"
@@ -60,6 +61,7 @@ async def _run_scheduled_task(
             task=effective_task,
             project_name=project_name,
             cwd=cwd,
+            allowed_tools=allowed_tools,
         )
         logger.info("Schedule %s completed: %s", schedule_name, job.status)
     except Exception:
@@ -80,10 +82,15 @@ def build_scheduler() -> AsyncIOScheduler:
             logger.error("Invalid cron for schedule %s: %s", row["name"], row["cron_expr"])
             continue
 
+        import json
+
+        raw_tools = row.get("allowed_tools")
+        tools = json.loads(raw_tools) if raw_tools else None
+
         scheduler.add_job(
             _run_scheduled_task,
             trigger=trigger,
-            args=[row["name"], row["task"], row["skill_name"], row["project_name"]],
+            args=[row["name"], row["task"], row["skill_name"], row["project_name"], tools],
             id=row["name"],
             name=row["name"],
             replace_existing=True,

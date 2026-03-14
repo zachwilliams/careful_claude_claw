@@ -59,3 +59,4 @@ class Schedule(BaseModel):
     skill_name: str | None = None
     project_name: str | None = None
     enabled: bool = True
+    allowed_tools: list[str] | None = None

@@ -38,6 +38,11 @@ def cli() -> None:
 @click.option("--backoff", default=5, help="Seconds to wait between retry attempts.")
 @click.option("--project", default=None, help="Project context for this run.")
 @click.option("--skill", default=None, help="Skill to run instead of a raw task.")
+@click.option(
+    "--allowed-tools",
+    default=None,
+    help="Comma-separated list of tools the agent can use.",
+)
 def run(
     task: str,
     agent_name: str,
@@ -45,6 +50,7 @@ def run(
     backoff: int,
     project: str | None,
     skill: str | None,
+    allowed_tools: str | None,
 ) -> None:
     """Run a one-shot agent task and log the result to SQLite."""
     init_db()
@@ -76,6 +82,8 @@ def run(
     console.print(f"[bold cyan]Task:[/bold cyan] {task[:100]}{'...' if len(task) > 100 else ''}")
     console.print()
 
+    tools_list = allowed_tools.split(",") if allowed_tools else None
+
     with console.status("[bold green]Running agent...[/bold green]"):
         job = asyncio.run(
             run_agent(
@@ -85,6 +93,7 @@ def run(
                 backoff_seconds=backoff,
                 project_name=project,
                 cwd=cwd,
+                allowed_tools=tools_list,
             )
         )
 
@@ -292,8 +301,18 @@ def schedule() -> None:
 @click.option("--task", default="", help="Task prompt to run.")
 @click.option("--skill", default=None, help="Skill name to run.")
 @click.option("--project", default=None, help="Project context.")
+@click.option(
+    "--allowed-tools",
+    default=None,
+    help="Comma-separated list of tools the agent can use.",
+)
 def schedule_add(
-    name: str, cron_expr: str, task: str, skill: str | None, project: str | None
+    name: str,
+    cron_expr: str,
+    task: str,
+    skill: str | None,
+    project: str | None,
+    allowed_tools: str | None,
 ) -> None:
     """Add a scheduled task. CRON_EXPR is a 5-field cron expression (e.g. '0 9 * * *')."""
     init_db()
@@ -301,7 +320,15 @@ def schedule_add(
         console.print("[red]Provide --task or --skill[/red]")
         return
 
-    s = Schedule(name=name, cron_expr=cron_expr, task=task, skill_name=skill, project_name=project)
+    tools_list = allowed_tools.split(",") if allowed_tools else None
+    s = Schedule(
+        name=name,
+        cron_expr=cron_expr,
+        task=task,
+        skill_name=skill,
+        project_name=project,
+        allowed_tools=tools_list,
+    )
     try:
         insert_schedule(s)
         console.print(f"[green]Schedule '{name}' added: {cron_expr}[/green]")
@@ -402,19 +429,64 @@ def status() -> None:
 
 
 @cli.command()
-def start() -> None:
-    """Start the scheduler daemon."""
+@click.option(
+    "--telegram/--no-telegram",
+    default=None,
+    help="Enable/disable Telegram listener (auto-detects from config).",
+)
+def start(telegram: bool | None) -> None:
+    """Start the scheduler daemon (optionally with Telegram listener)."""
     init_db()
-    console.print("[bold cyan]Starting scheduler...[/bold cyan]")
 
     import logging
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     from .scheduler import run_scheduler
+    from .telegram import load_telegram_config, run_telegram_listener
+
+    # Auto-detect Telegram if not explicitly set
+    tg_enabled = telegram if telegram is not None else load_telegram_config() is not None
+
+    async def _run_all() -> None:
+        tasks = [run_scheduler()]
+        if tg_enabled:
+            tasks.append(run_telegram_listener())
+        await asyncio.gather(*tasks)
+
+    if tg_enabled:
+        console.print("[bold cyan]Starting scheduler + Telegram listener...[/bold cyan]")
+    else:
+        console.print("[bold cyan]Starting scheduler...[/bold cyan]")
 
     try:
-        asyncio.run(run_scheduler())
+        asyncio.run(_run_all())
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
+
+
+# --- Telegram ---
+
+
+@cli.command()
+def telegram() -> None:
+    """Start the Telegram listener (standalone, for dev/testing)."""
+    init_db()
+
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    from .telegram import load_telegram_config, run_telegram_listener
+
+    if not load_telegram_config():
+        console.print("[red]Telegram not configured.[/red]")
+        console.print("[dim]Add botToken and chatId to ~/.mcp-telegram/config.json[/dim]")
+        return
+
+    console.print("[bold cyan]Starting Telegram listener...[/bold cyan]")
+    try:
+        asyncio.run(run_telegram_listener())
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
 

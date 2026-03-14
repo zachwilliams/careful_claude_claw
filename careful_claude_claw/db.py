@@ -44,7 +44,8 @@ def init_db() -> None:
                 task TEXT DEFAULT '',
                 skill_name TEXT,
                 project_name TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1
+                enabled INTEGER NOT NULL DEFAULT 1,
+                allowed_tools TEXT
             )
         """)
         conn.execute("""
@@ -154,10 +155,13 @@ def list_projects() -> list[dict]:
 
 
 def insert_schedule(schedule: Schedule) -> None:
+    import json
+
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO schedules (name, cron_expr, task, skill_name, project_name, enabled) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO schedules "
+            "(name, cron_expr, task, skill_name, project_name, enabled, allowed_tools) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 schedule.name,
                 schedule.cron_expr,
@@ -165,6 +169,7 @@ def insert_schedule(schedule: Schedule) -> None:
                 schedule.skill_name,
                 schedule.project_name,
                 1 if schedule.enabled else 0,
+                json.dumps(schedule.allowed_tools) if schedule.allowed_tools else None,
             ),
         )
 
