@@ -58,11 +58,10 @@ async def run_agent(
                     cwd=cwd,
                     allowed_tools=tools,
                     max_turns=10,
+                    setting_sources=setting_sources or ["user"],
                 )
                 if system_prompt is not None:
                     opts.system_prompt = system_prompt
-                if setting_sources is not None:
-                    opts.setting_sources = setting_sources
 
                 async for message in query(
                     prompt=task,

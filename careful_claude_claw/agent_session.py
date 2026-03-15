@@ -218,6 +218,7 @@ async def run_interactive_agent(
         cwd=str(workspace),
         allowed_tools=tools,
         max_turns=max_turns,
+        setting_sources=["user"],
     )
     if system_prompt is not None:
         opts.system_prompt = system_prompt
