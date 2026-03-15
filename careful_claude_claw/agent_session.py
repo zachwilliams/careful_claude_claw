@@ -111,17 +111,17 @@ async def kill_session(name: str) -> bool:
         return False
 
     try:
-        await session.client.interrupt()
-    except Exception:
-        logger.debug("interrupt() failed for %s, proceeding with cleanup", name)
+        await asyncio.wait_for(session.client.interrupt(), timeout=5)
+    except (TimeoutError, Exception):
+        logger.debug("interrupt() failed/timed out for %s, proceeding with cleanup", name)
 
     if session.task and not session.task.done():
         session.task.cancel()
 
     try:
-        await session.client.disconnect()
-    except Exception:
-        logger.debug("disconnect() failed for %s", name)
+        await asyncio.wait_for(session.client.disconnect(), timeout=5)
+    except (TimeoutError, Exception):
+        logger.debug("disconnect() failed/timed out for %s", name)
 
     # Update job status
     from .db import update_job_status
@@ -303,8 +303,8 @@ async def run_interactive_agent(
         # Only unregister session if it wasn't already killed
         if name in AGENT_SESSIONS:
             try:
-                await client.disconnect()
-            except Exception:
+                await asyncio.wait_for(client.disconnect(), timeout=5)
+            except (TimeoutError, Exception):
                 pass
             _cleanup_workspace(session)
             unregister_session(name)
