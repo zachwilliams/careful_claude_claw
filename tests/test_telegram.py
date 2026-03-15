@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import careful_claude_claw.agent_session as agent_session_module
 import careful_claude_claw.db as db_module
+from careful_claude_claw.agent_session import (
+    AGENT_SESSIONS,
+    AgentSession,
+    register_session,
+)
 from careful_claude_claw.models import Job, JobStatus
 from careful_claude_claw.telegram import (
     CommandRouter,
@@ -21,6 +27,15 @@ from careful_claude_claw.telegram import (
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
     db_module.init_db()
+
+
+@pytest.fixture(autouse=True)
+def clean_sessions():
+    AGENT_SESSIONS.clear()
+    agent_session_module._name_counter = 0
+    yield
+    AGENT_SESSIONS.clear()
+    agent_session_module._name_counter = 0
 
 
 @pytest.fixture
@@ -212,12 +227,14 @@ async def test_run_skill_not_found(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_free_text_spawns_agent(router, mock_bot):
-    with patch("careful_claude_claw.telegram._run_and_reply", new_callable=AsyncMock) as mock_run:
+    with patch(
+        "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
+    ) as mock_run:
         await router.handle_message("what time is it?")
-        mock_bot.send_message.assert_called_with("Starting task...")
+        mock_bot.send_message.assert_called_with("[task-1] Starting...")
         mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args
-        assert call_kwargs[1]["task"] == "what time is it?"
+        assert mock_run.call_args.kwargs["task"] == "what time is it?"
+        assert mock_run.call_args.kwargs["name"] == "task-1"
 
 
 @pytest.mark.asyncio
@@ -238,3 +255,158 @@ async def test_empty_message(router, mock_bot):
 async def test_empty_whitespace_message(router, mock_bot):
     await router.handle_message("   ")
     mock_bot.send_message.assert_not_called()
+
+
+# --- /agents ---
+
+
+@pytest.mark.asyncio
+async def test_agents_empty(router, mock_bot):
+    await router.handle_message("/agents")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "No active agent sessions" in msg
+
+
+@pytest.mark.asyncio
+async def test_agents_with_sessions(router, mock_bot):
+    client = MagicMock()
+    session = AgentSession(name="task-1", job_id="j1", client=client)
+    register_session(session)
+
+    await router.handle_message("/agents")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "task-1" in msg
+    assert "Active Agent Sessions (1)" in msg
+
+
+# --- /kill ---
+
+
+@pytest.mark.asyncio
+async def test_kill_no_args(router, mock_bot):
+    await router.handle_message("/kill")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "Usage" in msg
+
+
+@pytest.mark.asyncio
+async def test_kill_named_agent(router, mock_bot):
+    with patch("careful_claude_claw.telegram.kill_session", new_callable=AsyncMock) as mock_kill:
+        mock_kill.return_value = True
+        await router.handle_message("/kill task-1")
+        mock_kill.assert_awaited_once_with("task-1")
+        msg = mock_bot.send_message.call_args[0][0]
+        assert "Killed" in msg
+        assert "task-1" in msg
+
+
+@pytest.mark.asyncio
+async def test_kill_not_found(router, mock_bot):
+    with patch("careful_claude_claw.telegram.kill_session", new_callable=AsyncMock) as mock_kill:
+        mock_kill.return_value = False
+        await router.handle_message("/kill nope")
+        msg = mock_bot.send_message.call_args[0][0]
+        assert "No active agent" in msg
+
+
+@pytest.mark.asyncio
+async def test_kill_all(router, mock_bot):
+    with patch(
+        "careful_claude_claw.telegram.kill_all_sessions", new_callable=AsyncMock
+    ) as mock_kill_all:
+        mock_kill_all.return_value = 3
+        await router.handle_message("/kill all")
+        mock_kill_all.assert_awaited_once()
+        msg = mock_bot.send_message.call_args[0][0]
+        assert "3" in msg
+
+
+# --- /reply ---
+
+
+@pytest.mark.asyncio
+async def test_reply_no_args(router, mock_bot):
+    await router.handle_message("/reply")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "Usage" in msg
+
+
+@pytest.mark.asyncio
+async def test_reply_missing_message(router, mock_bot):
+    await router.handle_message("/reply task-1")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "Usage" in msg
+
+
+@pytest.mark.asyncio
+async def test_reply_sends_to_agent(router, mock_bot):
+    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+        await router.handle_message("/reply task-1 check the tests")
+        mock_send.assert_awaited_once_with("task-1", "check the tests")
+        # No error message sent
+        mock_bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reply_agent_not_found(router, mock_bot):
+    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = False
+        await router.handle_message("/reply nope hello")
+        msg = mock_bot.send_message.call_args[0][0]
+        assert "No active agent" in msg
+
+
+# --- @name routing ---
+
+
+@pytest.mark.asyncio
+async def test_at_reply_sends_to_agent(router, mock_bot):
+    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = True
+        await router.handle_message("@task-1 what about failing tests?")
+        mock_send.assert_awaited_once_with("task-1", "what about failing tests?")
+
+
+@pytest.mark.asyncio
+async def test_at_reply_agent_not_found(router, mock_bot):
+    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = False
+        await router.handle_message("@nope hello")
+        msg = mock_bot.send_message.call_args[0][0]
+        assert "No active agent" in msg
+
+
+@pytest.mark.asyncio
+async def test_at_reply_no_message(router, mock_bot):
+    await router.handle_message("@task-1")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "Usage" in msg
+
+
+# --- /status with sessions ---
+
+
+@pytest.mark.asyncio
+async def test_status_with_sessions(router, mock_bot):
+    client = MagicMock()
+    session = AgentSession(name="task-1", job_id="j1234567-rest", client=client)
+    register_session(session)
+
+    await router.handle_message("/status")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "Interactive Sessions" in msg
+    assert "task-1" in msg
+
+
+# --- help includes new commands ---
+
+
+@pytest.mark.asyncio
+async def test_help_includes_new_commands(router, mock_bot):
+    await router.handle_message("/help")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "/kill" in msg
+    assert "/reply" in msg
+    assert "/agents" in msg
+    assert "@<name>" in msg

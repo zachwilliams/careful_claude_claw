@@ -99,6 +99,12 @@ def update_job(job: Job) -> None:
         )
 
 
+def update_job_status(job_id: str, status: str) -> None:
+    """Update just the status of a job by ID."""
+    with get_connection() as conn:
+        conn.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
+
+
 def list_jobs(limit: int = 20, project_name: str | None = None) -> list[dict]:
     with get_connection() as conn:
         if project_name:

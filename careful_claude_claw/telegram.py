@@ -7,11 +7,21 @@ direct handlers or background agent tasks.
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 
 from .agent import run_agent
+from .agent_session import (
+    generate_name,
+    get_session,
+    kill_all_sessions,
+    kill_session,
+    list_sessions,
+    run_interactive_agent,
+    send_to_agent,
+)
 from .db import init_db, list_active_agents, list_jobs, list_projects, list_schedules
 from .skills import discover_skills, get_skill
 
@@ -19,8 +29,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org"
 TELEGRAM_SYSTEM_PROMPT = (
-    "You are CarefulClaw, a personal AI assistant responding via Telegram. "
-    "Respond concisely."
+    "You are CarefulClaw, a personal AI assistant responding via Telegram. Respond concisely."
 )
 
 
@@ -121,12 +130,18 @@ class CommandRouter:
             "/projects": self._handle_projects,
             "/skills": self._handle_skills,
             "/schedules": self._handle_schedules,
+            "/agents": self._handle_agents,
         }
 
     async def handle_message(self, text: str) -> None:
         """Route a message to the appropriate handler."""
         text = text.strip()
         if not text:
+            return
+
+        # Check for @name routing (e.g. "@task-1 do something")
+        if text.startswith("@"):
+            await self._handle_at_reply(text)
             return
 
         # Check for exact commands or /run
@@ -139,6 +154,10 @@ class CommandRouter:
             await self._commands[cmd]()
         elif cmd == "/run":
             await self._handle_run(text)
+        elif cmd == "/kill":
+            await self._handle_kill(text)
+        elif cmd == "/reply":
+            await self._handle_reply(text)
         else:
             # Free text -> spawn agent
             await self._spawn_agent(text)
@@ -149,6 +168,7 @@ class CommandRouter:
             "",
             "*Direct commands* (instant response):",
             "`/status`  — Active agents + recent jobs",
+            "`/agents`  — List active agent sessions",
             "`/jobs`  — Last 10 jobs with status",
             "`/projects`  — Registered projects",
             "`/skills`  — Available skills (global + per-project)",
@@ -159,14 +179,27 @@ class CommandRouter:
             "`/run <skill>`  — Run a named skill",
             "`/run <skill> --project <name>`  — Run skill with project context",
             "Free text  — Treated as a task, spawns an agent",
+            "",
+            "*Interactive agent commands:*",
+            "`/kill <name>`  — Kill a running agent",
+            "`/kill all`  — Kill all running agents",
+            "`/reply <name> <message>`  — Send input to a running agent",
+            "`@<name> <message>`  — Shorthand for /reply",
         ]
         await self.bot.send_message("\n".join(lines))
 
     async def _handle_status(self) -> None:
         agents = list_active_agents()
+        sessions = list_sessions()
         jobs = list_jobs(limit=5)
 
         lines = []
+        if sessions:
+            lines.append(f"*Interactive Sessions ({len(sessions)})*")
+            for s in sessions:
+                lines.append(f"  `{s.name}` (job: {s.job_id[:8]})")
+            lines.append("")
+
         if agents:
             lines.append(f"*Active Agents ({len(agents)})*")
             for a in agents:
@@ -244,6 +277,65 @@ class CommandRouter:
 
         await self.bot.send_message("\n".join(lines))
 
+    async def _handle_agents(self) -> None:
+        sessions = list_sessions()
+        if not sessions:
+            await self.bot.send_message("No active agent sessions.")
+            return
+
+        lines = [f"*Active Agent Sessions ({len(sessions)})*"]
+        for s in sessions:
+            age = datetime.now(UTC) - s.created_at
+            mins = int(age.total_seconds() // 60)
+            lines.append(f"  `{s.name}` — running for {mins}m")
+        await self.bot.send_message("\n".join(lines))
+
+    async def _handle_kill(self, text: str) -> None:
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await self.bot.send_message("Usage: /kill <name> or /kill all")
+            return
+
+        target = parts[1].strip()
+        if target == "all":
+            count = await kill_all_sessions()
+            await self.bot.send_message(f"Killed {count} agent(s).")
+        else:
+            killed = await kill_session(target)
+            if killed:
+                await self.bot.send_message(f"Killed agent `{target}`.")
+            else:
+                await self.bot.send_message(f"No active agent named `{target}`.")
+
+    async def _handle_reply(self, text: str) -> None:
+        parts = text.split(maxsplit=2)
+        if len(parts) < 3:
+            await self.bot.send_message("Usage: /reply <name> <message>")
+            return
+
+        name = parts[1]
+        message = parts[2]
+        sent = await send_to_agent(name, message)
+        if not sent:
+            await self.bot.send_message(f"No active agent named `{name}`.")
+
+    async def _handle_at_reply(self, text: str) -> None:
+        """Handle @name message routing."""
+        parts = text.split(maxsplit=1)
+        name = parts[0][1:]  # strip the @
+        if not name:
+            await self._spawn_agent(text)
+            return
+
+        if len(parts) < 2:
+            await self.bot.send_message(f"Usage: @{name} <message>")
+            return
+
+        message = parts[1]
+        sent = await send_to_agent(name, message)
+        if not sent:
+            await self.bot.send_message(f"No active agent named `{name}`.")
+
     async def _handle_run(self, text: str) -> None:
         """Parse /run <skill> [--project <name>] and spawn an agent."""
         parts = text.split()
@@ -277,28 +369,48 @@ class CommandRouter:
             if proj:
                 cwd = proj["path"]
 
-        await self.bot.send_message(f"Starting skill `{skill_name}`...")
-        asyncio.create_task(
-            _run_and_reply(
-                self.bot,
+        name = generate_name(f"skill-{skill_name}")
+        await self.bot.send_message(f"[{name}] Starting skill `{skill_name}`...")
+        bot = self.bot
+
+        async def on_message(msg: str) -> None:
+            await bot.send_message(msg)
+
+        bg_task = asyncio.create_task(
+            run_interactive_agent(
+                name=name,
                 task=task,
-                agent_name=f"tg-skill-{skill_name}",
+                on_message=on_message,
+                agent_name=f"tg-{name}",
                 project_name=project_name,
                 cwd=cwd,
             )
         )
+        session = get_session(name)
+        if session:
+            session.task = bg_task
 
     async def _spawn_agent(self, text: str) -> None:
         """Spawn a background agent for free-text tasks."""
-        await self.bot.send_message("Starting task...")
-        asyncio.create_task(
-            _run_and_reply(
-                self.bot,
+        name = generate_name("task")
+        await self.bot.send_message(f"[{name}] Starting...")
+        bot = self.bot
+
+        async def on_message(msg: str) -> None:
+            await bot.send_message(msg)
+
+        task = asyncio.create_task(
+            run_interactive_agent(
+                name=name,
                 task=text,
-                agent_name="tg-task",
+                on_message=on_message,
+                agent_name=f"tg-{name}",
                 system_prompt=TELEGRAM_SYSTEM_PROMPT,
             )
         )
+        session = get_session(name)
+        if session:
+            session.task = task
 
 
 async def _run_and_reply(
