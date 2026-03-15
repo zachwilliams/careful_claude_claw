@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 MessageCallback = Callable[[str], Awaitable[None]]
 
 
+IDLE_TIMEOUT_SECONDS = 600  # 10 minutes
+
+
 @dataclass
 class AgentSession:
     name: str
@@ -36,6 +39,7 @@ class AgentSession:
     client: ClaudeSDKClient
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 # Module-level registry
@@ -116,11 +120,33 @@ async def send_to_agent(name: str, message: str) -> bool:
         return False
 
     try:
+        session.last_activity = datetime.now(UTC)
         await session.client.query(message)
         return True
     except Exception:
         logger.exception("Failed to send message to agent %s", name)
         return False
+
+
+def _extract_assistant_text(msg: AssistantMessage) -> str | None:
+    """Extract text content from an AssistantMessage's content blocks."""
+    if not hasattr(msg, "content"):
+        return None
+    content = msg.content
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif hasattr(block, "type") and block.type == "text":
+                parts.append(getattr(block, "text", ""))
+        text = "\n".join(parts).strip()
+        return text or None
+    return None
 
 
 async def run_interactive_agent(
@@ -138,6 +164,8 @@ async def run_interactive_agent(
 
     Creates a persistent client session that supports follow-up messages
     and interrupts. Sends results to Telegram via on_message callback.
+    The session stays alive after the first result to allow follow-ups,
+    and auto-closes after IDLE_TIMEOUT_SECONDS of inactivity.
     """
     from .agent import DEFAULT_ALLOWED_TOOLS
 
@@ -171,23 +199,52 @@ async def run_interactive_agent(
         await client.connect(prompt=task)
 
         result_text: str | None = None
-        async for msg in client.receive_messages():
-            if isinstance(msg, ResultMessage):
-                result_text = msg.result
+        while True:
+            got_result = False
+            async for msg in client.receive_messages():
+                session.last_activity = datetime.now(UTC)
+                if isinstance(msg, ResultMessage):
+                    result_text = msg.result
+                    if result_text:
+                        await on_message(f"[{name}] {result_text}")
+                    got_result = True
+                    # Don't break — keep iterating if the stream continues
+                elif isinstance(msg, AssistantMessage):
+                    text = _extract_assistant_text(msg)
+                    if text:
+                        await on_message(f"[{name}] {text}")
+
+            # Iterator exhausted. If we got a result, wait for follow-up
+            if got_result:
+                # Wait for follow-up or idle timeout
+                while True:
+                    await asyncio.sleep(1)
+                    idle = (datetime.now(UTC) - session.last_activity).total_seconds()
+                    if idle >= IDLE_TIMEOUT_SECONDS:
+                        logger.info("Agent %s idle timeout after %ds", name, idle)
+                        await on_message(f"[{name}] Session closed (idle timeout).")
+                        break
+                    # If session was removed externally (killed), stop
+                    if name not in AGENT_SESSIONS:
+                        return job
+                    # Check if a new query was sent (last_activity updated)
+                    # If so, break to re-enter receive_messages loop
+                    if idle < 1.5:
+                        # Activity just happened, re-enter message loop
+                        break
+                else:
+                    # Idle timeout reached — exit outer loop
+                    break
+            else:
+                # Iterator ended without result — agent disconnected
                 break
-            elif isinstance(msg, AssistantMessage):
-                # Extract text from content blocks (not streamed to TG,
-                # but kept for potential future use)
-                pass
 
         job.status = JobStatus.SUCCESS
         job.output = result_text or ""
         job.ended_at = datetime.now(UTC)
         update_job(job)
 
-        if result_text:
-            await on_message(f"[{name}] {result_text}")
-        else:
+        if not result_text:
             await on_message(f"[{name}] Done.")
 
     except asyncio.CancelledError:

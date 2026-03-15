@@ -31,6 +31,9 @@ TELEGRAM_API = "https://api.telegram.org"
 TELEGRAM_SYSTEM_PROMPT = (
     "You are CarefulClaw, a personal AI assistant responding via Telegram. Respond concisely."
 )
+TELEGRAM_CONVERSATIONAL_TOOLS = [
+    "Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch",
+]
 
 
 def load_telegram_config() -> tuple[str, int] | None:
@@ -398,6 +401,7 @@ class CommandRouter:
                 on_message=on_message,
                 agent_name=f"tg-{name}",
                 system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                allowed_tools=TELEGRAM_CONVERSATIONAL_TOOLS,
             )
         )
         session = get_session(name)

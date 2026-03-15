@@ -1,472 +1,426 @@
-# CarefulClaudeClaw Orchestrator — Project Plan
+# CarefulClaudeClaw — Project Plan
 
 ## Overview
 
-A security-first, thin Python orchestrator that uses the **Claude Code Agent SDK** to spawn Claude Code as the execution engine for autonomous, scheduled, and event-driven AI workflows. Inspired by the [ClaudeClaw bridge pattern](https://promptadvisers.com) — keep the orchestration layer minimal and let Claude Code do what it already does well.
+A security-first Python platform for managing Claude Code agents across messaging interfaces, scheduled tasks, and the command line. Uses the **Claude Code Agent SDK** to spawn Claude Code as the execution engine for autonomous, scheduled, and interactive AI workflows.
 
 ### Design Principles
 
-- **Don't rebuild what Claude Code already provides.** Skills, MCP servers, CLAUDE.md, file access, permissions, and now `/loop` + cron scheduling — these are built in. We bridge to them, not replicate them.
-- **Single source of truth for security.** One `security.yaml` governs all permission layers.
-- **File-based configuration, SQLite for operational data.** Human-readable configs in git, queryable operational state in SQLite.
-- **Thin orchestration.** The Python layer handles durable cross-session scheduling, event routing, security compilation, and retry logic — nothing more.
-- **Delegate intra-session work to native features.** Short-lived polling, sub-task loops, and reminders within a single agent execution should use Claude Code's native `/loop` and cron tools rather than custom Python logic.
+- **Security-first.** Every agent execution is governed by explicit tool allowlists and behavioral policies. The `security.yaml` file is the single source of truth for what agents can do.
+- **Don't rebuild what Claude Code already provides.** Skills, MCP servers, CLAUDE.md, file access, and native scheduling — these are built in. We bridge to them, not replicate them.
+- **Skills are the unit of work.** Reusable markdown-based skill files define what agents do. Agents are ephemeral executors of skills.
+- **Multiple interfaces, one agent layer.** CLI, Telegram, and (future) Slack all route through the same agent execution and job tracking infrastructure.
+- **Thin orchestration.** The Python layer handles durable scheduling, messaging interfaces, security policy enforcement, agent lifecycle, and job tracking — nothing more.
 
 ---
 
 ## Architecture
 
-### Components
-
 ```
 ┌──────────────────────────────────────────────────┐
-│              Python Orchestrator                 │
-│  ┌───────────┐  ┌──────────┐ ┌────────────────┐  │
-│  │ Event     │  │ Cron     │ │ Webhook        │  │
-│  │ Queue     │  │ Scheduler│ │ Listener       │  │
-│  └─────┬─────┘  └────┬─────┘ └───────┬────────┘  │
-│        └─────────────┼───────────────┘           │
-│                      ▼                           │
-│         ┌────────────────────────┐               │
-│         │ Security Config        │               │
-│         │ Compiler               │               │
-│         │ (security.yaml →       │               │
-│         │  .claude/settings.json │               │
-│         │  .mcp.json             │               │
-│         │  policy instructions)  │               │
-│         └───────────┬────────────┘               │
-│                     ▼                            │
-│         ┌────────────────────────┐               │
-│         │ Agent SDK              │               │
-│         │ (spawns claude CLI)    │               │
-│         └───────────┬────────────┘               │
-│                     ▼                            │
-│         ┌────────────────────────┐               │
-│         │ Retry & Lifecycle      │               │
-│         │ Manager                │               │
-│         └────────────────────────┘               │
+│                  Interfaces                      │
+│  ┌──────────┐  ┌───────────┐  ┌──────────────┐  │
+│  │ CLI      │  │ Telegram  │  │ Scheduler    │  │
+│  │ (click)  │  │ (polling) │  │ (APScheduler)│  │
+│  └────┬─────┘  └─────┬─────┘  └──────┬───────┘  │
+│       └───────────────┼───────────────┘          │
+│                       ▼                          │
+│  ┌────────────────────────────────────────────┐  │
+│  │            Security Layer                  │  │
+│  │  security.yaml → allowed_tools             │  │
+│  │                 + system_prompt policies    │  │
+│  │                 + hooks (future)            │  │
+│  └────────────────────┬───────────────────────┘  │
+│                       ▼                          │
+│  ┌────────────────────────────────────────────┐  │
+│  │            Agent Layer                     │  │
+│  │  ┌──────────────┐  ┌───────────────────┐   │  │
+│  │  │ One-shot     │  │ Interactive       │   │  │
+│  │  │ (query)      │  │ (ClaudeSDKClient) │   │  │
+│  │  │ + retry      │  │ + session mgmt    │   │  │
+│  │  └──────────────┘  └───────────────────┘   │  │
+│  └────────────────────────────────────────────┘  │
+│                       │                          │
+│  ┌────────────────────┼───────────────────────┐  │
+│  │            Entity Layer                    │  │
+│  │  Projects · Skills · Schedules · Jobs      │  │
+│  └────────────────────────────────────────────┘  │
+│                       │                          │
+│               ┌───────┴───────┐                  │
+│               │    SQLite     │                  │
+│               └───────────────┘                  │
 └──────────────────────────────────────────────────┘
-                      │
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-    ┌──────────┐ ┌─────────┐ ┌─────────┐
-    │ SQLite   │ │ Git     │ │ Claude  │
-    │ (ops DB) │ │ (state) │ │ Code    │
-    └──────────┘ └─────────┘ └─────────┘
+                        │
+                ┌───────┴───────┐
+                │  Claude Code  │
+                │  (CLI / SDK)  │
+                └───────────────┘
 ```
 
-### Python Orchestrator
+### Interfaces
 
-The orchestrator is the only custom code. It handles:
+Three ways to trigger agent execution:
 
-- **Event queue** — Simple Python `queue.Queue` or file-based queue (`pending/`, `processing/`, `completed/`). No external message broker.
-- **Cron scheduler** — Python cron library (e.g., `APScheduler` or `schedule`). Fires events into the queue.
-- **Webhook listener** — Minimal HTTP server (FastAPI or Flask) that receives external triggers and enqueues events.
-- **Security config compiler** — Reads `security.yaml` and generates per-invocation Claude Code settings before each agent spawn.
-- **Retry & lifecycle manager** — Handles agent failures with simple backoff retry.
+- **CLI** (`click`) — `claw run`, `claw status`, `claw schedule`, etc. For local development and admin.
+- **Telegram** — Long-polling bot with command routing (`/status`, `/run`, `/kill`) and free-text agent spawning. Primary remote interface.
+- **Scheduler** (`APScheduler`) — Cron-based triggers that fire one-shot agent runs on a schedule. Durable across restarts.
 
-### Agent Execution via Agent SDK
+### Agent Layer
 
-When the orchestrator needs to execute a task:
+Two execution modes, both using the Claude Code Agent SDK:
 
-1. Read task definition and relevant config
-2. Compile security permissions from `security.yaml` into Claude Code settings
-3. Spawn Claude Code via the Agent SDK (official `claude` CLI subprocess)
-4. Claude Code executes using its built-in capabilities (skills, MCP servers, CLAUDE.md, file system, web search)
-5. Orchestrator captures results and updates operational state
+- **One-shot** (`agent.py`) — `query()` with retry logic. Fire-and-forget: send task, get result. Used by CLI `claw run` and scheduler.
+- **Interactive** (`agent_session.py`) — `ClaudeSDKClient` with bidirectional messaging. Supports follow-up messages (`/reply`, `@name`), interrupts, and session lifecycle. Used by Telegram for conversational agent interactions.
 
-This follows the ClaudeClaw pattern: the Agent SDK spawns the official Claude CLI, the OAuth token stays in `~/.claude/`, and we remain fully compliant with Anthropic's Terms of Service.
+### Entity Layer
+
+Four core entities, all persisted in SQLite:
+
+- **Projects** — Registered codebases with name, path, status. Provide `--cwd` context for agent runs.
+- **Skills** — Markdown files in `skills/` (global) or `<project>/skills/` (project-scoped). The reusable unit of work.
+- **Schedules** — Cron expressions mapped to tasks or skills. Loaded by APScheduler on startup.
+- **Jobs** — Execution history: agent name, task, status, attempts, output, errors, timing.
+
+### Security Layer
+
+Security policy is defined in `security.yaml` and enforced at the agent layer before every invocation. Three enforcement mechanisms:
+
+1. **Tool allowlists** — `allowed_tools` parameter on `ClaudeAgentOptions`. Controls which tools the agent can use. Already wired into both `run_agent()` and `run_interactive_agent()`.
+2. **Behavioral policies** — `system_prompt` injection. Policy text prepended to every agent invocation (e.g., "do not modify files outside the project directory").
+3. **Hooks** (future) — Claude Code pre/post hooks on tool calls for hard denies and audit logging at the tool-call level.
 
 ---
 
 ## Data Layer
 
-### SQLite (Operational Data)
+### SQLite (All Operational Data)
 
-SQLite is the operational database. Zero dependencies, single file, Python built-in support.
+SQLite is the single operational store. Zero dependencies, single file, Python built-in.
 
 | Table | Purpose |
 |---|---|
-| `events` | Event log — what happened, when, triggered by what |
-| `jobs` | Job history — agent, start time, end time, status, attempt count |
-| `memory` | FTS5-indexed memory with semantic and episodic sectors (see Memory section) |
-| `sessions` | Claude Code session IDs for conversation resumption |
-| `active_agents` | Currently running agents and their directives |
+| `jobs` | Job history — agent, task, status, attempts, timing, output, errors |
+| `projects` | Project registry — name, path, status, description |
+| `schedules` | Cron schedules — expression, task/skill reference, project, enabled |
+| `active_agents` | Currently running agents — job_id, agent_name, project, task, start time |
 
-### Git Repository (Configuration & Business State)
+### Skills (File-Based)
 
-All configuration and business state lives in a git repo. This provides audit trail, diffing, rollback, and human readability.
+Skills are markdown files discovered by convention:
 
 ```
-repo/
-├── security.yaml              # Single source of truth for all permissions
-├── agents/
-│   ├── invoice-processor/
-│   │   ├── config.md          # Agent-specific configuration
-│   │   └── instructions.md    # Agent behavioral instructions
-│   └── weekly-reporter/
-│       ├── config.md
-│       └── instructions.md
-├── global-state/              # Business state that agents produce/consume
-│   ├── clients/
-│   ├── reports/
-│   └── ...
-└── CLAUDE.md                  # Shared Claude Code instructions
+skills/                    # Global skills (available to all projects)
+  hello.md
+  daily-briefing.md
+<project-path>/skills/     # Project-scoped skills (override global by name)
+  review-pr.md
+  run-tests.md
 ```
 
-### Global State Merge Policy
+Project-scoped skills take priority over global skills with the same name.
 
-Global state updates follow a git-based workflow. The merge policy is configurable per path in `security.yaml`:
+### Persistent State (Future)
 
-- **Auto-merge paths** (e.g., `events/*`, `reports/*`) — Low-risk state that deterministic Python code merges directly to main.
-- **Require-review paths** (e.g., `clients/*`, `security.yaml`) — Changes are committed to a branch; a human reviews and approves before merge.
+For state that agents produce and consume across sessions (e.g., contact notes, project summaries), a simple approach:
 
-All merge logic for global state is implemented in **deterministic Python code**, not LLM-driven. This is the most security-sensitive operation in the system.
+- **State table** in SQLite — key-value store with namespace, markdown content, and timestamps.
+- **State files** — Optional markdown files in a `state/` directory for human-readable state that agents can read/write directly.
+
+No git-based merge logic. State is either agent-written (SQLite/files) or human-reviewed (PRs). Keeping these paths separate avoids the complexity of automated merge policies.
 
 ---
 
 ## Security
 
-### Single Configuration File
+### Design
 
-All security policy is defined in one file: `security.yaml`. The orchestrator compiles this into the three layers Claude Code expects before each invocation.
+Security is enforced per-invocation, not per-agent-identity. Every time the system spawns an agent — whether from CLI, Telegram, or scheduler — the security layer resolves the applicable policy and passes it to the Agent SDK.
+
+The policy resolution order:
+
+1. **Skill-level overrides** — A skill file can declare required tools or restrictions in frontmatter.
+2. **Project-level defaults** — Each project can define default tool allowlists and policies.
+3. **Global defaults** — Fallback tool allowlist and behavioral policies.
+
+### security.yaml
 
 ```yaml
 # security.yaml — single source of truth
 
-global:
-  retry:
-    max_attempts: 2
-    backoff_seconds: 30
-    on_final_failure: alert    # alert | ignore | queue_for_review
+defaults:
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+  max_turns: 10
+  max_attempts: 2
+  backoff_seconds: 30
+  system_prompt: |
+    You are a careful assistant. Do not modify files unless explicitly
+    instructed. Do not execute shell commands unless the task requires it.
 
-  global_state:
-    auto_merge:
-      - events/*
-      - reports/*
-    require_review:
-      - clients/*
-      - security.yaml
-      - agents/*/config.md
+projects:
+  my-webapp:
+    allowed_tools:
+      - Read
+      - Glob
+      - Grep
+      - Edit
+      - Write
+      - Bash
+    system_prompt: |
+      You are working on the my-webapp project. Follow the project's
+      CLAUDE.md conventions. Run tests after making changes.
 
-agents:
-  invoice-processor:
-    # Layer 2: Which MCP servers are available at all
-    mcp_servers:
-      - stripe
-      - notion
+skills:
+  daily-briefing:
+    allowed_tools:
+      - Read
+      - Glob
+      - Grep
+      - WebSearch
+      - WebFetch
+    max_turns: 20
 
-    # Layer 1 & 3: What actions are permitted
-    auto_approve:
-      - stripe:read_invoice
-      - stripe:list_invoices
-      - notion:query_database
-    require_confirmation:
-      - notion:update_page
-      - stripe:create_refund
-    hard_deny:
-      - shell:*
-      - file:write_outside_workspace
-
-    # What state this agent can access
-    state_access:
-      - clients/*.md
-      - invoices/*.md
-
-  weekly-reporter:
-    mcp_servers:
-      - notion
-    auto_approve:
-      - notion:query_database
-    hard_deny:
-      - notion:update_page
-      - shell:*
-    state_access:
-      - reports/*.md
+  deploy:
+    allowed_tools:
+      - Read
+      - Glob
+      - Grep
+      - Bash
+    require_confirmation: true   # Prompt user before executing
+    system_prompt: |
+      You are deploying code. Double-check the branch and environment
+      before running any deploy commands.
 ```
 
-### Three Security Layers
+### Enforcement Points
 
-The orchestrator compiles `security.yaml` into three concentric security rings:
-
-| Layer | Mechanism | What It Controls | Generated As |
-|---|---|---|---|
-| **1. Claude Code native permissions** | Hard technical boundary | Which tools can execute at all | `.claude/settings.json` |
-| **2. MCP server scoping** | Trust boundary | Which external services exist | `.mcp.json` |
-| **3. Policy instructions** | Behavioral boundary | When to ask, when to act autonomously | Prepended instructions to agent |
-
-The agent never sees or touches `security.yaml`. It only sees the derived permissions compiled for its specific invocation.
+| Mechanism | What It Controls | How It's Passed |
+|---|---|---|
+| `allowed_tools` | Which tools the agent can call | `ClaudeAgentOptions.allowed_tools` |
+| `system_prompt` | Behavioral boundaries and instructions | `ClaudeAgentOptions.system_prompt` |
+| `max_turns` | How long the agent can run | `ClaudeAgentOptions.max_turns` |
+| `require_confirmation` | Whether to prompt user before executing | Interface-level gate (Telegram confirmation, CLI prompt) |
+| Hooks (future) | Hard denies, audit logging at tool-call level | Claude Code hook system |
 
 ---
 
-## Native Claude Code Scheduling (v2.1.71+)
+## Native Claude Code Scheduling
 
-Claude Code now includes built-in scheduling features. Understanding their capabilities and limitations is critical for avoiding unnecessary custom work.
-
-### `/loop` Command
-
-Runs a prompt or slash command on a recurring interval within an active session.
-
-```
-/loop 5m check the deploy              # leading interval
-/loop check the build every 2 hours    # trailing "every" clause
-/loop 20m /review-pr 1234              # loop a slash command
-/loop check the build                  # defaults to every 10 minutes
-```
-
-Supports `s` (seconds, rounded up to minutes), `m` (minutes), `h` (hours), `d` (days).
-
-### Cron Tools (CronCreate, CronDelete, CronList)
-
-Low-level tools Claude uses internally. Full 5-field cron expressions (`MINUTE HOUR DAY-OF-MONTH MONTH DAY-OF-WEEK`). Also supports one-shot reminders ("remind me at 3pm to push").
-
-### Limitations (Why We Still Need the Python Orchestrator)
+Claude Code includes built-in scheduling features. Understanding the boundary between native and orchestrator scheduling:
 
 | Constraint | Impact |
 |---|---|
-| **Session-scoped only** | Tasks die when you exit the terminal |
-| **3-day auto-expiry** | Recurring tasks auto-delete after 3 days |
-| **No persistence across restarts** | Nothing survives a process exit |
-| **Requires active, idle session** | Tasks only fire when Claude is idle between turns |
-| **Max 50 tasks per session** | Hard cap on concurrent scheduled items |
-| **Not exposed in Agent SDK** | Can't programmatically create loops from Python |
+| Session-scoped only | Tasks die when you exit the terminal |
+| 3-day auto-expiry | Recurring tasks auto-delete after 3 days |
+| No persistence across restarts | Nothing survives a process exit |
+| Requires active, idle session | Tasks only fire when Claude is idle |
+| Not exposed in Agent SDK | Can't programmatically create loops from Python |
 
-### Division of Responsibility
+**Division of responsibility:**
 
 | Responsibility | Owner | Why |
 |---|---|---|
-| Durable cross-session scheduling | Python orchestrator (APScheduler) | Must survive restarts, no expiry limits |
+| Durable cross-session scheduling | Python orchestrator (APScheduler) | Must survive restarts |
 | Intra-session polling / sub-loops | Claude Code native `/loop` | Already built, no Python code needed |
-| External trigger handling (webhooks) | Python orchestrator (FastAPI) | Needs HTTP server, not available natively |
 | One-shot reminders during a task | Claude Code native cron | Natural language, zero config |
-| Security compilation per invocation | Python orchestrator | Requires pre-spawn config generation |
-| Job history and audit trail | Python orchestrator (SQLite + git) | Needs durable storage |
 
 ---
 
-## Memory System
+## Completed Phases
 
-Adapted from the ClaudeClaw three-layer memory pattern, using SQLite + FTS5.
+### Phase 1: Minimal Loop ✅
 
-### Layer 1: Session Resumption
-
-Claude Code session IDs are stored in SQLite. When an agent is invoked for a recurring task, the orchestrator can resume an existing session to maintain conversational context.
-
-### Layer 2: SQLite + FTS5 Memory
-
-Two memory sectors:
-
-- **Semantic** — Long-term facts, preferences, and stable knowledge. Slow decay (~2%/day without access). Trigger words: "my", "I am", "prefer", "remember", "always", "never".
-- **Episodic** — Conversations, events, transient context. Fast decay. Fades naturally over time.
-
-Salience model: starts at 1.0, +0.1 on access (capped at 5.0), -2%/day decay, auto-delete below 0.1.
-
-FTS5 provides full-text search built into SQLite. Zero cost, zero latency, no external vector database required.
-
-### Layer 3: Context Injection
-
-Before every agent invocation, the orchestrator:
-
-1. Runs FTS5 search against the incoming task → top 3 relevant memories
-2. Fetches 5 most recent memories
-3. Deduplicates
-4. Prepends as a `[Memory context]` block in the agent's instructions
-
----
-
-## Retry Logic
-
-Agent invocations are treated as opaque external calls with simple backoff retry.
-
-```
-Event arrives → Orchestrator dequeues
-
-  Attempt 1:
-    Compile security settings
-    Spawn Claude Code via Agent SDK
-    ├─ Success → Log to SQLite, proceed to state merge
-    └─ Failure → Archive outputs to history in SQLite
-
-  Wait (backoff_seconds from config, default 30s)
-
-  Attempt 2:
-    Fresh invocation (no carryover from attempt 1)
-    ├─ Success → Log to SQLite, proceed to state merge
-    └─ Failure → Mark event as failed, trigger on_final_failure action
-
-  Done — move to next event
-```
-
-Each retry is a completely fresh invocation. The agent does not know it is a retry unless explicitly told via context.
-
----
-
-## Observability
-
-### SQLite Dashboard
-
-The SQLite operational database supports queries for a lightweight dashboard:
-
-- **Currently running** — Query `active_agents` table
-- **Recent history** — Query `jobs` table for status, duration, retry count
-- **Failure analysis** — Aggregate failures by agent, time period, error type
-- **Execution stats** — Average duration, success rate per agent
-
-### Git Audit Trail
-
-The git repository provides complete audit trail for all configuration and business state changes. Every change has a timestamp, author (which agent or human), and diff.
-
-### History Archival
-
-When an agent completes, the orchestrator archives a subset of outputs (event log, key results) to the `jobs` table in SQLite and to the git `history/` path if relevant. Temporary working data is discarded.
-
----
-
-## Use Cases
-
-See `draft_usecases.md` for the full list. Key themes that drive infrastructure decisions:
-
-1. **Daily briefing** — scheduled agent runs that check email, Slack, calendar, to-dos
-2. **Project management** — projects as first-class entities that own agents, to-dos, plans, and status
-3. **Agent monitoring** — know what's running, on which project, for how long
-4. **Skill management** — directory of global and per-project skills, queryable summaries
-5. **Communications management** — catch up on email/Slack, draft replies with human confirmation
-6. **Relationship management** — persistent contact database with interaction history
-7. **Coding workflows** — consistent git/PR patterns across all projects
-
-Skills for individual use cases are developed independently. The orchestrator provides the infrastructure they run on.
-
----
-
-## Prototyping Roadmap
-
-### Phase 1: Minimal Loop ✅ COMPLETE
-
-- [x] Python script with a single hardcoded cron job
-- [x] Spawns Claude Code via Agent SDK
-- [x] Agent does one useful task (e.g., list MCP connections)
-- [x] Logs result to SQLite
-- [x] Basic retry logic with backoff
+- [x] Spawn Claude Code via Agent SDK with `query()`
+- [x] Retry logic with configurable backoff
+- [x] Job tracking in SQLite (insert, update, list)
 - [x] CLI: `claw run` and `claw jobs`
 - [x] Tests for models and db
-- **Goal:** End-to-end execution works
 
-**Implemented in:** `models.py` (Job, JobStatus), `db.py` (jobs table CRUD), `agent.py` (run_agent with retry), `cli.py` (run/jobs commands)
+**Files:** `models.py` (Job, JobStatus), `db.py` (jobs table), `agent.py` (run_agent), `cli.py` (run/jobs commands)
+
+### Phase 2: Project Model & Skill Registry ✅
+
+- [x] Project model with status (ACTIVE, PAUSED, ARCHIVED)
+- [x] Project CRUD in SQLite
+- [x] Skill discovery from `skills/` directories (global + project-scoped)
+- [x] CLI: `claw project add/list/status`, `claw skills`
+- [x] `claw run --skill <name> --project <name>`
+- [x] Tests for projects and skills
+
+**Files:** `models.py` (Project, Skill, SkillScope), `db.py` (projects table), `skills.py`, `cli.py`
+
+### Phase 3: Scheduler ✅
+
+- [x] APScheduler with 5-field cron parsing
+- [x] Schedule model with task/skill reference and project context
+- [x] Schedules table in SQLite
+- [x] `claw schedule add/list/remove`
+- [x] `claw start` — runs scheduler daemon
+- [x] Skill content resolution at execution time
+- [x] Tests for cron parsing
+
+**Files:** `models.py` (Schedule), `db.py` (schedules table), `scheduler.py`, `cli.py`
+
+### Phase 4: Agent Monitoring & Telegram ✅
+
+- [x] Active agents table — register on start, unregister on completion
+- [x] `claw status` — active agents + recent jobs
+- [x] `claw project status <name>` — project-specific view
+- [x] Interactive agent sessions via `ClaudeSDKClient`
+- [x] Session registry with kill/reply support
+- [x] Telegram bot with command routing and free-text agent spawning
+- [x] `claw start --telegram` — scheduler + Telegram listener
+- [x] Security: only processes messages from configured chat_id
+- [x] Tests for agent sessions and Telegram routing
+
+**Files:** `agent_session.py`, `telegram.py`, `db.py` (active_agents table), `cli.py`
 
 ---
 
-### Phase 2: Project Model & Skill Registry
+## Next Phases
 
-**Goal:** Projects and skills become first-class entities. The orchestrator knows what projects exist, what skills are available, and can run skills against projects.
+### Phase 5: Security Policy Enforcement
 
-#### 2.1 Project model
+**Goal:** `security.yaml` governs every agent invocation. Tool allowlists, behavioral policies, and turn limits are resolved from config before spawning.
 
-- [ ] Add to `careful_claude_claw/models.py`:
-  - `ProjectStatus` enum: ACTIVE, PAUSED, ARCHIVED
-  - `Project` pydantic model: name, path, status, description, created_at
-- [ ] Add to `careful_claude_claw/db.py`: `projects` table + insert_project, update_project, list_projects, get_project
+#### 5.1 Security config model
 
-#### 2.2 Skill registry
+- [ ] Create `careful_claude_claw/security/models.py`:
+  - `SecurityDefaults` — allowed_tools, max_turns, max_attempts, backoff_seconds, system_prompt
+  - `ProjectSecurity` — per-project overrides (allowed_tools, system_prompt)
+  - `SkillSecurity` — per-skill overrides (allowed_tools, max_turns, require_confirmation, system_prompt)
+  - `SecurityConfig` root model — defaults + `dict[str, ProjectSecurity]` projects + `dict[str, SkillSecurity]` skills
+- [ ] `load_security_config(path: Path) -> SecurityConfig`
 
-- [ ] Add to `careful_claude_claw/models.py`:
-  - `SkillScope` enum: GLOBAL, PROJECT
-  - `Skill` pydantic model: name, scope, project_name (optional), description, path
-- [ ] Implement `careful_claude_claw/skills.py`:
-  - `discover_skills()` — scan global skills dir + per-project skills dirs
-  - `list_skills(project_name=None)` — list all or filter by project
-  - `get_skill(name)` — return skill metadata
-- [ ] Convention: skills live as `.md` files in `skills/` (global) or `<project>/skills/` (project-scoped)
+#### 5.2 Policy resolver
 
-#### 2.3 CLI updates
+- [ ] Implement `careful_claude_claw/security/resolver.py`:
+  - `resolve_policy(config, skill_name, project_name) -> ResolvedPolicy`
+  - Merges: global defaults ← project overrides ← skill overrides
+  - `ResolvedPolicy`: allowed_tools, system_prompt, max_turns, max_attempts, backoff_seconds, require_confirmation
 
-- [ ] `claw projects` — list registered projects with status
-- [ ] `claw project add <name> <path>` — register a project
-- [ ] `claw skills` — list available skills (global + per-project)
-- [ ] `claw run --skill <name> --project <name>` — run a skill in a project context
+#### 5.3 Wire into agent execution
 
-#### 2.4 Tests
+- [ ] `run_agent()` and `run_interactive_agent()` accept optional `ResolvedPolicy`
+- [ ] CLI, Telegram, and scheduler all resolve policy before spawning
+- [ ] `require_confirmation` triggers a confirmation prompt in the active interface (Telegram inline keyboard, CLI y/n prompt)
 
-- [ ] `tests/test_projects.py` — project CRUD, status transitions
-- [ ] `tests/test_skills.py` — skill discovery, filtering, global vs project scope
+#### 5.4 Sample config + tests
+
+- [ ] Create `security.yaml` at project root with sensible defaults
+- [ ] `tests/test_security_models.py` — schema validation
+- [ ] `tests/test_security_resolver.py` — merge logic, override precedence
 
 **Files:**
-- Edit: `careful_claude_claw/models.py`, `careful_claude_claw/db.py`, `careful_claude_claw/cli.py`
-- New: `careful_claude_claw/skills.py`
-- New: `tests/test_projects.py`, `tests/test_skills.py`
+- New: `careful_claude_claw/security/models.py`, `careful_claude_claw/security/resolver.py`
+- Edit: `agent.py`, `agent_session.py`, `cli.py`, `telegram.py`, `scheduler.py`
+- New: `security.yaml`, `tests/test_security_models.py`, `tests/test_security_resolver.py`
 
 ---
 
-### Phase 3: Scheduler
+### Phase 6: Messaging Interface Abstraction
 
-**Goal:** Cron-based scheduling that fires agent runs on a schedule. Lightweight — no event queue, no webhooks. Just "run this skill/task at this time."
+**Goal:** Extract Telegram into a generic messaging interface. Add Slack. Make the active interface config-driven.
 
-> **Simplification note (v2.1.71):** Claude Code has native `/loop` and cron tools for intra-session polling. This phase handles only **durable, cross-session** scheduling that survives restarts. Intra-session loops are delegated to agents natively.
+#### 6.1 Interface protocol
 
-#### 3.1 Schedule model
+- [ ] Define `careful_claude_claw/interfaces/base.py`:
+  - `MessagingInterface` protocol/ABC: `send_message()`, `run_listener()`, command routing hooks
+  - Common command set: status, jobs, projects, skills, schedules, agents, run, kill, reply
+- [ ] Move shared command logic out of `telegram.py` into a `CommandHandler` that interfaces delegate to
 
-- [ ] Add to `careful_claude_claw/models.py`:
-  - `Schedule` pydantic model: name, cron_expr, task (or skill name), project_name (optional), enabled
-- [ ] Add to `careful_claude_claw/db.py`: `schedules` table + CRUD functions
+#### 6.2 Refactor Telegram
 
-#### 3.2 Scheduler daemon
+- [ ] Move `telegram.py` → `careful_claude_claw/interfaces/telegram.py`
+- [ ] Implement `MessagingInterface` protocol
+- [ ] Preserve all existing functionality
 
-- [ ] Implement `careful_claude_claw/scheduler.py`
-  - APScheduler `AsyncIOScheduler` wrapper
-  - `load_schedules()` — read from SQLite, register with APScheduler
-  - Each trigger calls `run_agent()` directly (no event queue layer)
-  - `start_scheduler()` / `stop_scheduler()`
+#### 6.3 Add Slack
 
-#### 3.3 CLI updates
+- [ ] Implement `careful_claude_claw/interfaces/slack.py`
+  - Slack Bot via socket mode or webhook (evaluate at implementation time)
+  - Same command set as Telegram
+  - Slack-specific formatting (blocks, threads)
 
-- [ ] `claw schedule add <name> <cron_expr> --task "..." --skill <name> --project <name>`
-- [ ] `claw schedule list` — show all schedules with next fire time
-- [ ] `claw schedule remove <name>`
-- [ ] `claw start` — starts scheduler daemon (foreground process)
+#### 6.4 Config-driven interface selection
 
-#### 3.4 Tests
+- [ ] Add to config: `interface: telegram | slack` (or support multiple simultaneously)
+- [ ] `claw start` reads config and launches the selected interface(s)
 
-- [ ] `tests/test_scheduler.py` — mock APScheduler, verify agent runs triggered on schedule
+#### 6.5 Tests
+
+- [ ] `tests/test_interfaces.py` — shared command handler tests
+- [ ] `tests/test_slack.py` — Slack-specific routing and formatting
 
 **Files:**
-- Edit: `careful_claude_claw/models.py`, `careful_claude_claw/db.py`, `careful_claude_claw/cli.py`
-- Edit: `careful_claude_claw/scheduler.py`
-- New: `tests/test_scheduler.py`
+- New: `careful_claude_claw/interfaces/base.py`, `careful_claude_claw/interfaces/telegram.py`, `careful_claude_claw/interfaces/slack.py`
+- Delete: `careful_claude_claw/telegram.py` (moved)
+- Edit: `cli.py`
 
 ---
 
-### Phase 4: Agent Monitoring & Status
+### Phase 7: Persistent State
 
-**Goal:** Know what's running, what finished, and basic stats. Enough to support "show me all active agents" and "what's the status of project X."
+**Goal:** Simple cross-session state that agents can read and write. No git merge logic — just a state store.
 
-#### 4.1 Active agents tracking
+#### 7.1 State table
 
-- [ ] Add to `careful_claude_claw/db.py`: `active_agents` table (agent_name, job_id, project_name, task, started_at)
-- [ ] Wire into `agent.py`: register on start, remove on completion
+- [ ] Add `state` table to SQLite: namespace (TEXT), key (TEXT), value (TEXT/markdown), updated_at, updated_by (agent name)
+- [ ] CRUD functions: `get_state()`, `set_state()`, `list_state()`, `delete_state()`
+- [ ] Namespaces map to projects or global scope
 
-#### 4.2 CLI status commands
+#### 7.2 State skill integration
 
-- [ ] `claw status` — show active agents (name, project, task, duration) + recent job results
-- [ ] `claw project status <name>` — show project info + its recent jobs + active agents
+- [ ] Agents can read/write state via a `state/` directory convention or system prompt instructions
+- [ ] State context injection: before agent invocation, relevant state entries are included in the system prompt
 
-#### 4.3 Tests
+#### 7.3 Tests
 
-- [ ] `tests/test_status.py` — active agent tracking, status query correctness
+- [ ] `tests/test_state.py` — CRUD, namespacing, agent attribution
 
 **Files:**
-- Edit: `careful_claude_claw/db.py`, `careful_claude_claw/agent.py`, `careful_claude_claw/cli.py`
-- New: `tests/test_status.py`
+- Edit: `db.py`, `agent.py`, `agent_session.py`
+- New: `tests/test_state.py`
 
 ---
 
-### Execution Order
+### Phase 8: Observability
 
-Build sequentially: **Phase 2 → 3 → 4**. Each phase builds on the previous:
+**Goal:** Better visibility into what's running and what happened.
 
-- Phase 2 (projects + skills) gives us entities to schedule and monitor
-- Phase 3 (scheduler) gives us automated execution
-- Phase 4 (monitoring) gives us visibility into what's running
+#### 8.1 Enhanced status
 
-Within each phase, work bottom-up: **models → db → core logic → CLI → tests**.
+- [ ] `claw dashboard` — Rich TUI with live-updating active agents, recent jobs, schedule next-fire times
+- [ ] Failure analysis: aggregate failures by agent, time period, error type
+
+#### 8.2 Alerting
+
+- [ ] On final failure (after max retries), send alert via active messaging interface
+- [ ] Configurable in `security.yaml`: `on_final_failure: alert | ignore`
+
+#### 8.3 Hooks-based audit logging (depends on Phase 5)
+
+- [ ] Claude Code hooks for pre/post tool call logging
+- [ ] Audit trail: which tools each agent actually used, not just what was allowed
+
+**Files:**
+- Edit: `cli.py`, `agent.py`, `scheduler.py`
+- New: `careful_claude_claw/hooks/` (if hooks integration warrants its own module)
+
+---
+
+## Execution Order
+
+Build sequentially: **Phase 5 → 6 → 7 → 8**. Each phase builds on the previous:
+
+- Phase 5 (security) establishes the policy layer that all interfaces enforce
+- Phase 6 (messaging abstraction) enables multi-channel access with consistent security
+- Phase 7 (state) gives agents persistent context across sessions
+- Phase 8 (observability) provides visibility and alerting
+
+Within each phase, work bottom-up: **models → core logic → integration → CLI/interface → tests**.
 
 ### Verification (after each phase)
 
@@ -478,141 +432,25 @@ uv run claw run                                # smoke test end-to-end
 
 ---
 
-## Future Phases
-
-The following phases are deferred but preserved for when the simplified path proves its value and use cases demand them. They build on the infrastructure from phases 2–4 above.
-
-### Future: Security Config
-
-**Goal:** `security.yaml` is the single source of truth; a compiler turns it into the three layers Claude Code expects.
-
-**When needed:** When we have multiple agents with different permission requirements, or when agents need access to sensitive MCP servers (Stripe, production databases) that warrant hard deny lists.
-
-#### F.1 Define security.yaml Pydantic schema
-
-- [ ] Create `careful_claude_claw/security/models.py`
-  - `GlobalRetryConfig` — max_attempts, backoff_seconds, on_final_failure
-  - `GlobalStateConfig` — auto_merge paths, require_review paths
-  - `GlobalConfig` — retry + global_state
-  - `AgentSecurityConfig` — mcp_servers, auto_approve, require_confirmation, hard_deny, state_access
-  - `SecurityConfig` root model — global + `dict[str, AgentSecurityConfig]` agents
-- [ ] `load_security_config(path: Path) -> SecurityConfig` loader function
-
-#### F.2 Build the compiler
-
-- [ ] Implement in `careful_claude_claw/security/compiler.py`
-  - `compile_settings_json(agent_config) -> dict` — maps auto_approve → allowedTools, hard_deny → deniedTools for `.claude/settings.json`
-  - `compile_mcp_json(agent_config) -> dict` — generates `.mcp.json` scoping available MCP servers
-  - `compile_policy_instructions(agent_config) -> str` — generates behavioral system prompt (require_confirmation items become "ask before using" instructions)
-  - `compile_for_agent(config, agent_name) -> CompiledAgentConfig` — bundles all three outputs
-
-#### F.3 Wire into agent execution
-
-- [ ] `run_agent()` accepts optional `SecurityConfig` or compiled config
-- [ ] Before spawning, writes `.claude/settings.json` and `.mcp.json` to agent's workspace directory
-- [ ] Passes policy instructions via `system_prompt`
-
-#### F.4 Sample config + tests
-
-- [ ] Create sample `security.yaml` at project root with example agent definitions
-- [ ] `tests/test_security_models.py` — schema validation (valid loads, invalid raises)
-- [ ] `tests/test_security_compiler.py` — compiler output assertions per output type, round-trip: load yaml → compile → verify JSON
-
----
-
-### Future: Event Queue & Webhooks
-
-**Goal:** Full event-driven architecture with webhooks for external triggers.
-
-**When needed:** When external systems (GitHub, Slack, etc.) need to trigger agent runs via HTTP, or when we need guaranteed exactly-once processing with a durable queue.
-
-#### F.5 Event model + SQLite-backed queue
-
-- [ ] `EventType` enum: CRON, WEBHOOK, MANUAL
-- [ ] `EventStatus` enum: PENDING, PROCESSING, COMPLETED, FAILED
-- [ ] `Event` pydantic model with atomic dequeue (PENDING → PROCESSING)
-- [ ] `process_events()` worker loop
-
-#### F.6 Webhook listener
-
-- [ ] FastAPI app with `POST /webhook/{agent_name}` → enqueues event
-- [ ] `GET /health` health check
-
-#### F.7 Upgrade scheduler to use event queue
-
-- [ ] Cron triggers enqueue events instead of calling `run_agent()` directly
-
----
-
-### Future: Memory & State
-
-**Goal:** Cross-agent memory sharing, salience-based decay, and git-based global state management.
-
-**When needed:** When an orchestration agent needs persistent memory across sessions to manage communications, or when multiple agents need to share context (e.g., relationship manager + daily briefing both need contact history).
-
-> **Note:** Claude Code's native auto-memory (`~/.claude/projects/<path>/memory/MEMORY.md`) handles simple per-agent persistence. This phase is for capabilities beyond what native memory provides.
-
-#### F.8 Evaluate native auto-memory coverage
-
-- [ ] Test auto-memory scoping via `--cwd` with Agent SDK
-- [ ] Decision gate: if native memory covers 80%+ of needs, build a thin wrapper instead of full FTS5
-
-#### F.9 Custom FTS5 memory (if needed)
-
-- [ ] SQLite `memory` table + FTS5 virtual table
-- [ ] Salience model: +0.1 on access, -2%/day decay, auto-delete below 0.1
-- [ ] Context injection: FTS5 search → top memories → prepend to agent prompt
-
-#### F.10 Git-based global state
-
-- [ ] Deterministic Python merge logic (no LLM)
-- [ ] Auto-merge paths vs require-review paths from config
-- [ ] `commit_state_change(path, content, agent_name)`
-
----
-
-### Future: Full Observability
-
-**Goal:** Dashboard, alerting, and comprehensive monitoring.
-
-**When needed:** When we're running enough agents on enough schedules that CLI status checks aren't sufficient.
-
-#### F.11 HTML dashboard
-
-- [ ] Hosted dashboard showing active agents, recent history, project status, skill directory
-- [ ] Real-time updates via polling or SSE
-
-#### F.12 Alerting
-
-- [ ] On final failure (after max retries), trigger configurable action: alert, queue_for_review, ignore
-- [ ] Webhook notification support
-
-#### F.13 Advanced stats
-
-- [ ] Per-agent success rates, average durations
-- [ ] Failure analysis grouped by agent, time period, error type
-
----
-
-## What We Are NOT Building (Now)
+## What We Are NOT Building
 
 - Custom agent framework (Claude Code already is one)
 - External databases beyond SQLite
-- Workspace isolation per agent (defer unless concurrency issues arise)
+- Event queue or webhook listener (direct execution is sufficient; Telegram/Slack cover remote triggers)
+- Git-based state merge logic (too complex for the value; simple state store instead)
 - Multi-agent coordination beyond Claude Code's built-in sub-agent delegation
 - OAuth token extraction or any approach that violates Anthropic's Terms of Service
-- **Intra-session scheduling or polling** — Claude Code's native `/loop` and cron tools handle this; we don't replicate it in Python
-- **Simple per-agent memory** — Claude Code's native auto-memory (`memory/MEMORY.md`) handles basic persistence; we only build custom FTS5 memory if cross-agent sharing or salience decay is needed
-- **Skills themselves** — Skills are developed independently; the orchestrator provides infrastructure for discovering, registering, and running them
-- **Security compilation** — Deferred until multi-agent permission scoping is needed (see Future Phases)
-- **Event queue / webhooks** — Deferred; direct scheduler → agent execution is sufficient for now
+- **Intra-session scheduling or polling** — Claude Code's native `/loop` and cron tools handle this
+- **Simple per-agent memory** — Claude Code's native auto-memory handles basic persistence
+- **Named agent identities** — Agents are ephemeral; skills and projects define the work, not agent personas
+- **Skills themselves** — Skills are developed independently; the platform provides infrastructure for discovering, registering, and running them
 
 ---
 
 ## Key References
 
-- **ClaudeClaw** by Mark Kashef — Bridge pattern, Agent SDK usage, memory system design ([promptadvisers.com](https://promptadvisers.com))
 - **Claude Code Agent SDK** — Official Anthropic SDK for spawning Claude Code as a subprocess
-- **Claude Code permissions** — `.claude/settings.json` for allow/deny tool patterns
+- **Claude Code permissions** — `allowed_tools` parameter, `.claude/settings.json` for allow/deny patterns
+- **Claude Code hooks** — Pre/post hooks on tool calls for interception and audit
 - **MCP (Model Context Protocol)** — Verified connections to external services via `.mcp.json`
-- **Claude Code v2.1.71 changelog** — `/loop` command, CronCreate/CronDelete/CronList tools, auto-memory
+- **Claude Code native scheduling** — `/loop` command, CronCreate/CronDelete/CronList tools
