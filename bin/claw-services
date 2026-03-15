@@ -148,12 +148,6 @@ cmd_status() {
 
 cmd_restart() {
     cmd_stop
-    # Clear logs on restart
-    if [[ -d "$LOG_DIR" ]]; then
-        rm -f "$LOG_DIR"/*.log
-        echo "  [ok] logs cleared"
-        echo
-    fi
     cmd_start
 }
 
