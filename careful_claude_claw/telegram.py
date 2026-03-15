@@ -107,6 +107,48 @@ class TelegramBot:
         destination.write_bytes(resp.content)
         return destination
 
+    async def send_and_get_id(self, text: str) -> int | None:
+        """Send a message and return its message_id."""
+        payload = {"chat_id": self.chat_id, "text": text}
+        try:
+            resp = await self._client.post(f"{self._base}/sendMessage", json=payload)
+            if resp.is_success:
+                return resp.json().get("result", {}).get("message_id")
+        except httpx.HTTPError:
+            pass
+        return None
+
+    async def delete_message(self, message_id: int) -> bool:
+        """Delete a single message. Returns True if successful."""
+        try:
+            resp = await self._client.post(
+                f"{self._base}/deleteMessage",
+                json={"chat_id": self.chat_id, "message_id": message_id},
+            )
+            return resp.is_success
+        except httpx.HTTPError:
+            return False
+
+    async def delete_all_messages(self, latest_message_id: int) -> int:
+        """Delete messages counting down from latest_message_id.
+
+        Stops after 10 consecutive failures (past bot's reachable history).
+        """
+        deleted = 0
+        consecutive_failures = 0
+        msg_id = latest_message_id
+
+        while consecutive_failures < 10 and msg_id > 0:
+            if await self.delete_message(msg_id):
+                deleted += 1
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+            msg_id -= 1
+            await asyncio.sleep(0.05)  # rate-limit safety
+
+        return deleted
+
     async def send_message(self, text: str, parse_mode: str | None = "Markdown") -> None:
         """Send a message, auto-splitting if over 4096 chars."""
         chunks = _split_message(text)

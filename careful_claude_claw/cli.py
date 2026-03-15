@@ -390,5 +390,59 @@ def telegram() -> None:
         console.print("\n[dim]Stopped.[/dim]")
 
 
+# --- Reset (dev) ---
+
+
+async def _clear_telegram(token: str, chat_id: int) -> int:
+    """Clear all reachable messages in the Telegram chat."""
+    from .telegram import TelegramBot
+
+    bot = TelegramBot(token, chat_id)
+    try:
+        probe_id = await bot.send_and_get_id("Resetting...")
+        if not probe_id:
+            return 0
+        return await bot.delete_all_messages(probe_id)
+    finally:
+        await bot.close()
+
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@click.option("--db-only", is_flag=True, help="Only reset the database.")
+@click.option("--telegram-only", is_flag=True, help="Only clear Telegram messages.")
+def reset(yes: bool, db_only: bool, telegram_only: bool) -> None:
+    """[Dev] Wipe all data: clear SQLite DB and Telegram chat history."""
+    if not yes:
+        click.confirm(
+            "This will DELETE all database data and Telegram messages. Continue?",
+            abort=True,
+        )
+
+    # Kill active agent sessions
+    if not telegram_only:
+        from .agent_session import kill_all_sessions
+
+        killed = asyncio.run(kill_all_sessions())
+        if killed:
+            console.print(f"[yellow]Killed {killed} active agent(s).[/yellow]")
+
+        init_db()
+        console.print("[green]Database reset.[/green]")
+
+    if not db_only:
+        from .telegram import load_telegram_config
+
+        config = load_telegram_config()
+        if not config:
+            console.print("[yellow]Telegram not configured, skipping message cleanup.[/yellow]")
+        else:
+            token, chat_id = config
+            deleted = asyncio.run(_clear_telegram(token, chat_id))
+            console.print(f"[green]Deleted {deleted} Telegram message(s).[/green]")
+
+    console.print("[bold green]Reset complete.[/bold green]")
+
+
 if __name__ == "__main__":
     cli()
