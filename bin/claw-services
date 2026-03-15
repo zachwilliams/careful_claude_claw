@@ -6,16 +6,26 @@
 #   claw-services start   Start all services
 #   claw-services stop    Stop all services
 #   claw-services status  Show service status
+#   claw-services restart  Restart all services
+#   claw-services dev-reset  Stop, wipe DB + Telegram messages, clear logs, restart
 #   claw-services logs    Tail all logs
 #
 
 set -euo pipefail
 
 CLAW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source local environment overrides (gitignored)
+if [[ -f "$CLAW_DIR/.env" ]]; then
+    set -a
+    source "$CLAW_DIR/.env"
+    set +a
+fi
+
 PID_DIR="$CLAW_DIR/.pids"
 LOG_DIR="$CLAW_DIR/.logs"
 
-TG_CLI="/Users/zach/projects/mcp-telegram/.venv/bin/tg"
+TG_CLI="${MCP_TELEGRAM_CLI:-tg}"
 TG_PID_FILE="$HOME/.mcp-telegram/daemon.pid"
 
 mkdir -p "$PID_DIR" "$LOG_DIR"
@@ -50,7 +60,7 @@ cmd_start() {
     # 1. mcp-telegram daemon
     if _is_running "$TG_PID_FILE"; then
         echo "  [ok] telegram daemon (already running, pid $(_pid_of "$TG_PID_FILE"))"
-    else
+    elif command -v "$TG_CLI" &>/dev/null; then
         "$TG_CLI" daemon start 2>&1 | tail -1
         sleep 1
         if _is_running "$TG_PID_FILE"; then
@@ -58,6 +68,8 @@ cmd_start() {
         else
             echo "  [!!] telegram daemon (failed to start)"
         fi
+    else
+        echo "  [!!] telegram daemon (skipped — '$TG_CLI' not found; set MCP_TELEGRAM_CLI or install tg)"
     fi
 
     # 2. claw (scheduler + telegram listener)
@@ -97,8 +109,15 @@ cmd_stop() {
 
     # 2. telegram daemon
     if _is_running "$TG_PID_FILE"; then
-        "$TG_CLI" daemon stop 2>&1 | tail -1
-        echo "  [ok] telegram daemon stopped"
+        if command -v "$TG_CLI" &>/dev/null; then
+            "$TG_CLI" daemon stop 2>&1 | tail -1
+            echo "  [ok] telegram daemon stopped"
+        else
+            local pid
+            pid=$(_pid_of "$TG_PID_FILE")
+            kill "$pid" 2>/dev/null && echo "  [ok] telegram daemon stopped (pid $pid, killed directly)"
+            rm -f "$TG_PID_FILE"
+        fi
     else
         echo "  [--] telegram daemon (not running)"
     fi
@@ -127,6 +146,39 @@ cmd_status() {
     echo
 }
 
+cmd_restart() {
+    cmd_stop
+    cmd_start
+}
+
+cmd_dev_reset() {
+    echo "=== CarefulClaw Dev Reset ==="
+    echo "This will: stop services, wipe the DB, delete Telegram messages, clear logs, and restart."
+    echo
+    read -rp "Are you sure? [y/N] " confirm
+    if [[ "$confirm" != [yY] ]]; then
+        echo "Aborted."
+        return
+    fi
+    echo
+
+    cmd_stop
+
+    # Wipe DB + Telegram messages
+    cd "$CLAW_DIR"
+    uv run claw reset -y
+    echo
+
+    # Clear logs
+    if [[ -d "$LOG_DIR" ]]; then
+        rm -f "$LOG_DIR"/*.log
+        echo "  [ok] logs cleared"
+        echo
+    fi
+
+    cmd_start
+}
+
 cmd_logs() {
     local files=()
     [[ -f "$LOG_DIR/claw.log" ]] && files+=("$LOG_DIR/claw.log")
@@ -143,12 +195,14 @@ cmd_logs() {
 # --- Main ---
 
 case "${1:-}" in
-    start)  cmd_start ;;
-    stop)   cmd_stop ;;
-    status) cmd_status ;;
-    logs)   cmd_logs ;;
+    start)     cmd_start ;;
+    stop)      cmd_stop ;;
+    restart)   cmd_restart ;;
+    dev-reset) cmd_dev_reset ;;
+    status)    cmd_status ;;
+    logs)      cmd_logs ;;
     *)
-        echo "Usage: claw-services {start|stop|status|logs}"
+        echo "Usage: claw-services {start|stop|restart|dev-reset|status|logs}"
         exit 1
         ;;
 esac

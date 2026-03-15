@@ -14,50 +14,38 @@ class JobStatus(StrEnum):
 
 
 class Job(BaseModel):
+    """A task definition that can be one-shot or recurring (cron)."""
+
+    name: str
+    task: str = ""
+    skill_name: str | None = None
+    cron_expr: str | None = None
+    cwd: str | None = None
+    enabled: bool = True
+    allowed_tools: list[str] | None = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class Execution(BaseModel):
+    """A single run of a job (manual or scheduled)."""
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    job_name: str
     agent_name: str
-    task: str
     status: JobStatus = JobStatus.PENDING
     attempt: int = 1
-    project_name: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     output: str | None = None
     error: str | None = None
 
 
-class ProjectStatus(StrEnum):
-    ACTIVE = "active"
-    PAUSED = "paused"
-    ARCHIVED = "archived"
-
-
-class Project(BaseModel):
-    name: str
-    path: str
-    status: ProjectStatus = ProjectStatus.ACTIVE
-    description: str = ""
-    created_at: datetime = Field(default_factory=datetime.now)
-
-
 class SkillScope(StrEnum):
     GLOBAL = "global"
-    PROJECT = "project"
 
 
 class Skill(BaseModel):
     name: str
     scope: SkillScope = SkillScope.GLOBAL
-    project_name: str | None = None
     description: str = ""
     file_path: str = ""
-
-
-class Schedule(BaseModel):
-    name: str
-    cron_expr: str
-    task: str = ""
-    skill_name: str | None = None
-    project_name: str | None = None
-    enabled: bool = True
-    allowed_tools: list[str] | None = None

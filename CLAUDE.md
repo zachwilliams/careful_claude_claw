@@ -22,6 +22,10 @@ uv add <package>
 
 # Add a dev-only dependency
 uv add --dev <package>
+
+# Set up local environment overrides (for service scripts)
+cp .env.example .env
+# Edit .env with your machine-specific paths (e.g. MCP_TELEGRAM_CLI)
 ```
 
 ## Common Commands
@@ -31,13 +35,16 @@ uv add --dev <package>
 uv run claw
 
 # Run a one-shot agent task
-uv run claw run --task "..." --project <name> --skill <name>
+uv run claw run --task "..." --cwd <dir> --skill <name>
 
 # Start scheduler + Telegram listener
 uv run claw start
 
 # Show status
 uv run claw status
+
+# Dev reset: wipe DB + Telegram chat history
+uv run claw reset
 
 # Run tests
 uv run pytest
@@ -60,14 +67,14 @@ uv run ruff format .
 ├── pyrightconfig.json               # Pyright/pylance type checker config
 ├── skills/                          # Global skills directory (*.md files)
 ├── bin/
-│   └── claw-services                # Service management script
+│   └── claw-services                # Service management script (start/stop/restart/status/logs)
 ├── careful_claude_claw/             # Main application package
 │   ├── __init__.py
-│   ├── cli.py                       # CLI entrypoint (click) — run, jobs, status, projects, skills, schedules, start, telegram
+│   ├── cli.py                       # CLI entrypoint (click) — run, jobs, status, skills, start, telegram, reset
 │   ├── agent.py                     # One-shot agent spawner (query) + retry logic
 │   ├── agent_session.py             # Interactive agent sessions (ClaudeSDKClient) + session registry
-│   ├── models.py                    # Pydantic models: Job, Project, Skill, Schedule
-│   ├── db.py                        # SQLite operations: jobs, projects, schedules, active_agents
+│   ├── models.py                    # Pydantic models: Job, Execution, Skill
+│   ├── db.py                        # SQLite operations: jobs, executions, active_agents
 │   ├── scheduler.py                 # APScheduler cron wrapper
 │   ├── skills.py                    # Skill discovery from skills/ directories
 │   ├── telegram.py                  # Telegram bot: long-polling, command routing, agent spawning
@@ -76,7 +83,6 @@ uv run ruff format .
 └── tests/                           # Test suite (mirrors careful_claude_claw/ structure)
     ├── test_models.py
     ├── test_db.py
-    ├── test_projects.py
     ├── test_skills.py
     ├── test_scheduler.py
     ├── test_agent_session.py
@@ -90,7 +96,7 @@ uv run ruff format .
 - Follow PEP 8; enforced via `ruff`
 - Use type hints throughout
 - Use `pydantic` models for all data structures
-- Skills are markdown files in `skills/` (global) or `<project>/skills/` (project-scoped)
+- Skills are markdown files in `skills/` (global)
 - Security policy will live in `security.yaml`; never hardcode permissions elsewhere
 
 ## Testing

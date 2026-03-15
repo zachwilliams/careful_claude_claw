@@ -6,6 +6,7 @@ and maintains an in-memory registry of active sessions.
 
 import asyncio
 import logging
+import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -20,8 +21,8 @@ from claude_agent_sdk import (
     ResultMessage,
 )
 
-from .db import insert_job, register_active_agent, unregister_active_agent, update_job
-from .models import Job, JobStatus
+from .db import insert_execution, register_active_agent, unregister_active_agent, update_execution
+from .models import Execution, JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,13 @@ IDLE_TIMEOUT_SECONDS = 600  # 10 minutes
 @dataclass
 class AgentSession:
     name: str
-    job_id: str
+    execution_id: str
     client: ClaudeSDKClient
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
+    cwd: Path | None = None
+    is_temp_workspace: bool = False
 
 
 # Module-level registry
@@ -67,38 +70,65 @@ def unregister_session(name: str) -> None:
     AGENT_SESSIONS.pop(name, None)
 
 
+def _resolve_name(name: str) -> str | None:
+    """Resolve a session name case-insensitively. Returns the canonical name or None."""
+    if name in AGENT_SESSIONS:
+        return name
+    name_lower = name.lower()
+    for key in AGENT_SESSIONS:
+        if key.lower() == name_lower:
+            return key
+    return None
+
+
 def get_session(name: str) -> AgentSession | None:
-    return AGENT_SESSIONS.get(name)
+    resolved = _resolve_name(name)
+    return AGENT_SESSIONS.get(resolved) if resolved else None
 
 
 def list_sessions() -> list[AgentSession]:
     return list(AGENT_SESSIONS.values())
 
 
+def _cleanup_workspace(session: AgentSession) -> None:
+    """Remove temp workspace directory if applicable."""
+    if session.is_temp_workspace and session.cwd and session.cwd.exists():
+        try:
+            shutil.rmtree(session.cwd)
+            logger.info("Cleaned up temp workspace: %s", session.cwd)
+        except OSError:
+            logger.warning("Failed to clean up workspace: %s", session.cwd)
+
+
 async def kill_session(name: str) -> bool:
-    """Kill an agent session by name. Returns True if found and killed."""
-    session = AGENT_SESSIONS.get(name)
+    """Kill an agent session by name (case-insensitive). Returns True if found and killed."""
+    resolved = _resolve_name(name)
+    if resolved is None:
+        return False
+    name = resolved
+    session = AGENT_SESSIONS[name]
     if session is None:
         return False
 
     try:
-        await session.client.interrupt()
-    except Exception:
-        logger.debug("interrupt() failed for %s, proceeding with cleanup", name)
+        await asyncio.wait_for(session.client.interrupt(), timeout=5)
+    except (TimeoutError, Exception):
+        logger.debug("interrupt() failed/timed out for %s, proceeding with cleanup", name)
 
     if session.task and not session.task.done():
         session.task.cancel()
 
     try:
-        await session.client.disconnect()
-    except Exception:
-        logger.debug("disconnect() failed for %s", name)
+        await asyncio.wait_for(session.client.disconnect(), timeout=5)
+    except (TimeoutError, Exception):
+        logger.debug("disconnect() failed/timed out for %s", name)
 
-    # Update job status
-    from .db import update_job_status
+    # Update execution status
+    from .db import update_execution_status
 
-    update_job_status(session.job_id, JobStatus.CANCELLED)
-    unregister_active_agent(session.job_id)
+    update_execution_status(session.execution_id, JobStatus.CANCELLED)
+    unregister_active_agent(session.execution_id)
+    _cleanup_workspace(session)
     unregister_session(name)
     return True
 
@@ -114,10 +144,11 @@ async def kill_all_sessions() -> int:
 
 
 async def send_to_agent(name: str, message: str) -> bool:
-    """Send a follow-up message to a running agent. Returns True if sent."""
-    session = AGENT_SESSIONS.get(name)
-    if session is None:
+    """Send a follow-up message to a running agent (case-insensitive). Returns True if sent."""
+    resolved = _resolve_name(name)
+    if resolved is None:
         return False
+    session = AGENT_SESSIONS[resolved]
 
     try:
         session.last_activity = datetime.now(UTC)
@@ -156,10 +187,10 @@ async def run_interactive_agent(
     agent_name: str = "tg-task",
     cwd: str | None = None,
     system_prompt: str | None = None,
-    project_name: str | None = None,
+    job_name: str = "interactive",
     allowed_tools: list[str] | None = None,
     max_turns: int = 10,
-) -> Job:
+) -> Execution:
     """Spawn an interactive agent using ClaudeSDKClient.
 
     Creates a persistent client session that supports follow-up messages
@@ -169,34 +200,42 @@ async def run_interactive_agent(
     """
     from .agent import DEFAULT_ALLOWED_TOOLS
 
-    workspace = Path(cwd) if cwd else Path.cwd() / "workspace"
+    is_temp = cwd is None
+    workspace = Path(cwd) if cwd else Path.cwd() / "workspace" / name
     workspace.mkdir(parents=True, exist_ok=True)
 
-    job = Job(
+    execution = Execution(
+        job_name=job_name,
         agent_name=agent_name,
-        task=task,
-        project_name=project_name,
         started_at=datetime.now(UTC),
         status=JobStatus.RUNNING,
     )
-    insert_job(job)
-    register_active_agent(job)
+    insert_execution(execution)
+    register_active_agent(execution)
 
     tools = allowed_tools or DEFAULT_ALLOWED_TOOLS
     opts = ClaudeAgentOptions(
         cwd=str(workspace),
         allowed_tools=tools,
         max_turns=max_turns,
+        setting_sources=["user"],
     )
     if system_prompt is not None:
         opts.system_prompt = system_prompt
 
     client = ClaudeSDKClient(options=opts)
-    session = AgentSession(name=name, job_id=job.id, client=client)
+    session = AgentSession(
+        name=name,
+        execution_id=execution.id,
+        client=client,
+        cwd=workspace,
+        is_temp_workspace=is_temp,
+    )
     register_session(session)
 
     try:
-        await client.connect(prompt=task)
+        await client.connect()
+        await client.query(task)
 
         result_text: str | None = None
         while True:
@@ -206,67 +245,59 @@ async def run_interactive_agent(
                 if isinstance(msg, ResultMessage):
                     result_text = msg.result
                     if result_text:
-                        await on_message(f"[{name}] {result_text}")
+                        await on_message(f"@{name}: {result_text}")
                     got_result = True
-                    # Don't break — keep iterating if the stream continues
                 elif isinstance(msg, AssistantMessage):
                     text = _extract_assistant_text(msg)
                     if text:
-                        await on_message(f"[{name}] {text}")
+                        await on_message(f"@{name}: {text}")
 
             # Iterator exhausted. If we got a result, wait for follow-up
             if got_result:
-                # Wait for follow-up or idle timeout
                 while True:
                     await asyncio.sleep(1)
                     idle = (datetime.now(UTC) - session.last_activity).total_seconds()
                     if idle >= IDLE_TIMEOUT_SECONDS:
                         logger.info("Agent %s idle timeout after %ds", name, idle)
-                        await on_message(f"[{name}] Session closed (idle timeout).")
+                        await on_message(f"@{name}: Session closed (idle timeout).")
                         break
-                    # If session was removed externally (killed), stop
                     if name not in AGENT_SESSIONS:
-                        return job
-                    # Check if a new query was sent (last_activity updated)
-                    # If so, break to re-enter receive_messages loop
+                        return execution
                     if idle < 1.5:
-                        # Activity just happened, re-enter message loop
                         break
                 else:
-                    # Idle timeout reached — exit outer loop
                     break
             else:
-                # Iterator ended without result — agent disconnected
                 break
 
-        job.status = JobStatus.SUCCESS
-        job.output = result_text or ""
-        job.ended_at = datetime.now(UTC)
-        update_job(job)
+        execution.status = JobStatus.SUCCESS
+        execution.output = result_text or ""
+        execution.ended_at = datetime.now(UTC)
+        update_execution(execution)
 
         if not result_text:
-            await on_message(f"[{name}] Done.")
+            await on_message(f"@{name}: Done.")
 
     except asyncio.CancelledError:
-        job.status = JobStatus.CANCELLED
-        job.ended_at = datetime.now(UTC)
-        update_job(job)
-        await on_message(f"[{name}] Cancelled.")
+        execution.status = JobStatus.CANCELLED
+        execution.ended_at = datetime.now(UTC)
+        update_execution(execution)
+        await on_message(f"@{name}: Cancelled.")
     except (CLINotFoundError, CLIConnectionError, Exception) as exc:
         logger.exception("Interactive agent %s failed", name)
-        job.status = JobStatus.FAILED
-        job.error = str(exc)
-        job.ended_at = datetime.now(UTC)
-        update_job(job)
-        await on_message(f"[{name}] Failed: {exc}")
+        execution.status = JobStatus.FAILED
+        execution.error = str(exc)
+        execution.ended_at = datetime.now(UTC)
+        update_execution(execution)
+        await on_message(f"@{name}: Failed: {exc}")
     finally:
-        unregister_active_agent(job.id)
-        # Only unregister session if it wasn't already killed
+        unregister_active_agent(execution.id)
         if name in AGENT_SESSIONS:
             try:
-                await client.disconnect()
-            except Exception:
+                await asyncio.wait_for(client.disconnect(), timeout=5)
+            except (TimeoutError, Exception):
                 pass
+            _cleanup_workspace(session)
             unregister_session(name)
 
-    return job
+    return execution

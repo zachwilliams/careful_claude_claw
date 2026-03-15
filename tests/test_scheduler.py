@@ -1,7 +1,7 @@
 import pytest
 
 import careful_claude_claw.db as db_module
-from careful_claude_claw.models import Schedule
+from careful_claude_claw.models import Job
 from careful_claude_claw.scheduler import _parse_cron
 
 
@@ -11,11 +11,11 @@ def isolated_db(tmp_path, monkeypatch):
     db_module.init_db()
 
 
-def test_insert_and_list_schedules():
-    s = Schedule(name="morning", cron_expr="0 9 * * *", task="Check emails")
-    db_module.insert_schedule(s)
+def test_insert_and_list_cron_jobs():
+    job = Job(name="morning", task="Check emails", cron_expr="0 9 * * *")
+    db_module.insert_job(job)
 
-    rows = db_module.list_schedules()
+    rows = db_module.list_jobs(cron_only=True)
     assert len(rows) == 1
     assert rows[0]["name"] == "morning"
     assert rows[0]["cron_expr"] == "0 9 * * *"
@@ -23,27 +23,27 @@ def test_insert_and_list_schedules():
     assert rows[0]["enabled"]
 
 
-def test_delete_schedule():
-    s = Schedule(name="test", cron_expr="*/5 * * * *", task="ping")
-    db_module.insert_schedule(s)
-    assert len(db_module.list_schedules()) == 1
+def test_delete_cron_job():
+    job = Job(name="test", task="ping", cron_expr="*/5 * * * *")
+    db_module.insert_job(job)
+    assert len(db_module.list_jobs(cron_only=True)) == 1
 
-    db_module.delete_schedule("test")
-    assert len(db_module.list_schedules()) == 0
+    db_module.delete_job("test")
+    assert len(db_module.list_jobs(cron_only=True)) == 0
 
 
-def test_schedule_with_skill():
-    s = Schedule(
+def test_cron_job_with_skill():
+    job = Job(
         name="review",
         cron_expr="0 10 * * 1-5",
         skill_name="code-review",
-        project_name="myproj",
+        cwd="/home/user/project",
     )
-    db_module.insert_schedule(s)
+    db_module.insert_job(job)
 
-    rows = db_module.list_schedules()
+    rows = db_module.list_jobs(cron_only=True)
     assert rows[0]["skill_name"] == "code-review"
-    assert rows[0]["project_name"] == "myproj"
+    assert rows[0]["cwd"] == "/home/user/project"
 
 
 def test_parse_cron_valid():
@@ -64,21 +64,20 @@ def test_parse_cron_wrong_field_count():
 def test_active_agents_crud():
     from datetime import UTC, datetime
 
-    from careful_claude_claw.models import Job, JobStatus
+    from careful_claude_claw.models import Execution, JobStatus
 
-    job = Job(
+    ex = Execution(
+        job_name="test-job",
         agent_name="test-agent",
-        task="test task",
-        project_name="proj1",
         started_at=datetime.now(UTC),
         status=JobStatus.RUNNING,
     )
 
-    db_module.register_active_agent(job)
+    db_module.register_active_agent(ex)
     agents = db_module.list_active_agents()
     assert len(agents) == 1
     assert agents[0]["agent_name"] == "test-agent"
-    assert agents[0]["project_name"] == "proj1"
+    assert agents[0]["job_name"] == "test-job"
 
-    db_module.unregister_active_agent(job.id)
+    db_module.unregister_active_agent(ex.id)
     assert len(db_module.list_active_agents()) == 0

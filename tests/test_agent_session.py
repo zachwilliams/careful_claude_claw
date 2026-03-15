@@ -9,6 +9,7 @@ import careful_claude_claw.db as db_module
 from careful_claude_claw.agent_session import (
     AGENT_SESSIONS,
     AgentSession,
+    _cleanup_workspace,
     generate_name,
     get_session,
     kill_all_sessions,
@@ -49,7 +50,7 @@ def _make_session(name: str = "task-1") -> AgentSession:
     client.interrupt = AsyncMock()
     client.disconnect = AsyncMock()
     client.query = AsyncMock()
-    return AgentSession(name=name, job_id="test-job-id", client=client)
+    return AgentSession(name=name, execution_id="test-exec-id", client=client)
 
 
 # --- generate_name ---
@@ -109,18 +110,53 @@ def test_list_sessions():
     assert names == {"a", "b"}
 
 
+# --- case-insensitive lookup ---
+
+
+def test_get_session_case_insensitive():
+    session = _make_session("T1")
+    register_session(session)
+    assert get_session("t1") is session
+    assert get_session("T1") is session
+
+
+@pytest.mark.asyncio
+async def test_kill_session_case_insensitive():
+    session = _make_session("T2")
+    session.client.interrupt = AsyncMock()
+    session.client.disconnect = AsyncMock()
+    register_session(session)
+    result = await kill_session("t2")
+    assert result is True
+    assert get_session("T2") is None
+
+
+@pytest.mark.asyncio
+async def test_send_to_agent_case_insensitive():
+    session = _make_session("T3")
+    session.client.query = AsyncMock()
+    register_session(session)
+    result = await send_to_agent("t3", "hello")
+    assert result is True
+    session.client.query.assert_awaited_once_with("hello")
+
+
 # --- kill_session ---
 
 
 @pytest.mark.asyncio
 async def test_kill_session_success():
-    session = _make_session("kill-me")
-    # Insert a job so update_job_status can find it
-    from careful_claude_claw.models import Job
+    from careful_claude_claw.models import Execution
 
-    job = Job(id="test-job-id", agent_name="test", task="test", started_at=datetime.now(UTC))
-    db_module.insert_job(job)
-    db_module.register_active_agent(job)
+    session = _make_session("kill-me")
+    ex = Execution(
+        id="test-exec-id",
+        job_name="test-job",
+        agent_name="test",
+        started_at=datetime.now(UTC),
+    )
+    db_module.insert_execution(ex)
+    db_module.register_active_agent(ex)
 
     session.task = MagicMock()
     session.task.done.return_value = False
@@ -145,15 +181,20 @@ async def test_kill_session_not_found():
 
 @pytest.mark.asyncio
 async def test_kill_all_sessions():
-    from careful_claude_claw.models import Job
+    from careful_claude_claw.models import Execution
 
     for i in range(3):
-        job_id = f"job-{i}"
-        job = Job(id=job_id, agent_name="test", task="test", started_at=datetime.now(UTC))
-        db_module.insert_job(job)
-        db_module.register_active_agent(job)
+        exec_id = f"exec-{i}"
+        ex = Execution(
+            id=exec_id,
+            job_name="test-job",
+            agent_name="test",
+            started_at=datetime.now(UTC),
+        )
+        db_module.insert_execution(ex)
+        db_module.register_active_agent(ex)
         session = _make_session(f"agent-{i}")
-        session.job_id = job_id
+        session.execution_id = exec_id
         register_session(session)
 
     count = await kill_all_sessions()
@@ -188,3 +229,68 @@ async def test_send_to_agent_error():
 
     result = await send_to_agent("error-agent", "hello")
     assert result is False
+
+
+# --- workspace cleanup ---
+
+
+def test_cleanup_workspace_temp(tmp_path):
+    """Temp workspace should be deleted on cleanup."""
+    workspace = tmp_path / "workspace" / "T1"
+    workspace.mkdir(parents=True)
+    (workspace / "somefile.txt").write_text("data")
+
+    session = _make_session("T1")
+    session.cwd = workspace
+    session.is_temp_workspace = True
+
+    _cleanup_workspace(session)
+    assert not workspace.exists()
+
+
+def test_cleanup_workspace_project(tmp_path):
+    """Project workspace (is_temp_workspace=False) should NOT be deleted."""
+    workspace = tmp_path / "my_project"
+    workspace.mkdir(parents=True)
+    (workspace / "code.py").write_text("print('hi')")
+
+    session = _make_session("S1")
+    session.cwd = workspace
+    session.is_temp_workspace = False
+
+    _cleanup_workspace(session)
+    assert workspace.exists()
+    assert (workspace / "code.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_kill_session_cleans_workspace(tmp_path):
+    """Kill should trigger workspace cleanup for temp workspaces."""
+    from careful_claude_claw.models import Execution
+
+    workspace = tmp_path / "workspace" / "K1"
+    workspace.mkdir(parents=True)
+    (workspace / "temp.txt").write_text("temp data")
+
+    exec_id = "kill-cleanup-exec"
+    ex = Execution(
+        id=exec_id,
+        job_name="test-job",
+        agent_name="test",
+        started_at=datetime.now(UTC),
+    )
+    db_module.insert_execution(ex)
+    db_module.register_active_agent(ex)
+
+    session = _make_session("K1")
+    session.execution_id = exec_id
+    session.cwd = workspace
+    session.is_temp_workspace = True
+    session.task = MagicMock()
+    session.task.done.return_value = False
+    session.task.cancel = MagicMock()
+    register_session(session)
+
+    result = await kill_session("K1")
+    assert result is True
+    assert not workspace.exists()

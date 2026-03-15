@@ -1,14 +1,7 @@
 import pytest
 
-import careful_claude_claw.db as db_module
 import careful_claude_claw.skills as skills_module
-from careful_claude_claw.models import Project, SkillScope
-
-
-@pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch):
-    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
-    db_module.init_db()
+from careful_claude_claw.models import SkillScope
 
 
 @pytest.fixture()
@@ -32,22 +25,6 @@ def test_discover_global_skills(global_skills_dir):
     assert all(s.scope == SkillScope.GLOBAL for s in skills)
 
 
-def test_discover_project_skills(tmp_path, global_skills_dir):
-    proj_dir = tmp_path / "myproject"
-    proj_skills = proj_dir / "skills"
-    proj_skills.mkdir(parents=True)
-    (proj_skills / "deploy.md").write_text("# Deploy\nDeploy the app.")
-
-    p = Project(name="myproject", path=str(proj_dir))
-    db_module.insert_project(p)
-
-    skills = skills_module.discover_skills("myproject")
-    proj_only = [s for s in skills if s.scope == SkillScope.PROJECT]
-    assert len(proj_only) == 1
-    assert proj_only[0].name == "deploy"
-    assert proj_only[0].project_name == "myproject"
-
-
 def test_get_skill_by_name(global_skills_dir):
     (global_skills_dir / "briefing.md").write_text("# Briefing\nMorning update.")
 
@@ -59,22 +36,6 @@ def test_get_skill_by_name(global_skills_dir):
 
 def test_get_skill_not_found(global_skills_dir):
     assert skills_module.get_skill("nonexistent") is None
-
-
-def test_project_skill_takes_priority(tmp_path, global_skills_dir):
-    (global_skills_dir / "review.md").write_text("# Global Review")
-
-    proj_dir = tmp_path / "proj"
-    proj_skills = proj_dir / "skills"
-    proj_skills.mkdir(parents=True)
-    (proj_skills / "review.md").write_text("# Project Review")
-
-    p = Project(name="proj", path=str(proj_dir))
-    db_module.insert_project(p)
-
-    skill = skills_module.get_skill("review", "proj")
-    assert skill is not None
-    assert skill.scope == SkillScope.PROJECT
 
 
 def test_skill_description_parsing(global_skills_dir):

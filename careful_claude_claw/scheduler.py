@@ -1,11 +1,12 @@
 import asyncio
+import json
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from .agent import run_agent
-from .db import init_db, list_schedules
+from .db import init_db, list_jobs
 from .skills import get_skill
 
 logger = logging.getLogger(__name__)
@@ -21,19 +22,19 @@ def _parse_cron(expr: str) -> CronTrigger:
 
 
 async def _run_scheduled_task(
-    schedule_name: str,
+    job_name: str,
     task: str,
     skill_name: str | None,
-    project_name: str | None,
+    cwd: str | None,
     allowed_tools: list[str] | None = None,
 ) -> None:
     """Execute a scheduled task by running an agent."""
-    agent_name = f"sched-{schedule_name}"
+    agent_name = f"sched-{job_name}"
 
     # If a skill is referenced, read its content as the task prompt
     effective_task = task
     if skill_name:
-        skill = get_skill(skill_name, project_name)
+        skill = get_skill(skill_name)
         if skill and skill.file_path:
             try:
                 from pathlib import Path
@@ -43,46 +44,36 @@ async def _run_scheduled_task(
                 logger.warning("Could not read skill file %s, using task string", skill.file_path)
 
     if not effective_task:
-        logger.warning("Schedule %s has no task or skill content, skipping", schedule_name)
+        logger.warning("Job %s has no task or skill content, skipping", job_name)
         return
 
-    cwd = None
-    if project_name:
-        from .db import get_project
-
-        proj = get_project(project_name)
-        if proj:
-            cwd = proj["path"]
-
-    logger.info("Running scheduled task: %s", schedule_name)
+    logger.info("Running scheduled task: %s", job_name)
     try:
-        job = await run_agent(
+        execution = await run_agent(
             agent_name=agent_name,
             task=effective_task,
-            project_name=project_name,
+            job_name=job_name,
             cwd=cwd,
             allowed_tools=allowed_tools,
         )
-        logger.info("Schedule %s completed: %s", schedule_name, job.status)
+        logger.info("Job %s completed: %s", job_name, execution.status)
     except Exception:
-        logger.exception("Schedule %s failed", schedule_name)
+        logger.exception("Job %s failed", job_name)
 
 
 def build_scheduler() -> AsyncIOScheduler:
-    """Create a scheduler with all enabled schedules from the database."""
+    """Create a scheduler with all enabled cron jobs from the database."""
     init_db()
     scheduler = AsyncIOScheduler()
 
-    for row in list_schedules():
+    for row in list_jobs(cron_only=True):
         if not row["enabled"]:
             continue
         try:
             trigger = _parse_cron(row["cron_expr"])
         except ValueError:
-            logger.error("Invalid cron for schedule %s: %s", row["name"], row["cron_expr"])
+            logger.error("Invalid cron for job %s: %s", row["name"], row["cron_expr"])
             continue
-
-        import json
 
         raw_tools = row.get("allowed_tools")
         tools = json.loads(raw_tools) if raw_tools else None
@@ -90,12 +81,12 @@ def build_scheduler() -> AsyncIOScheduler:
         scheduler.add_job(
             _run_scheduled_task,
             trigger=trigger,
-            args=[row["name"], row["task"], row["skill_name"], row["project_name"], tools],
+            args=[row["name"], row["task"], row["skill_name"], row["cwd"], tools],
             id=row["name"],
             name=row["name"],
             replace_existing=True,
         )
-        logger.info("Loaded schedule: %s (%s)", row["name"], row["cron_expr"])
+        logger.info("Loaded cron job: %s (%s)", row["name"], row["cron_expr"])
 
     return scheduler
 
