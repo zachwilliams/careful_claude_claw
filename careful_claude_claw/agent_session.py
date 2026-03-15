@@ -6,6 +6,7 @@ and maintains an in-memory registry of active sessions.
 
 import asyncio
 import logging
+import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -40,6 +41,8 @@ class AgentSession:
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
+    cwd: Path | None = None
+    is_temp_workspace: bool = False
 
 
 # Module-level registry
@@ -87,6 +90,16 @@ def list_sessions() -> list[AgentSession]:
     return list(AGENT_SESSIONS.values())
 
 
+def _cleanup_workspace(session: AgentSession) -> None:
+    """Remove temp workspace directory if applicable."""
+    if session.is_temp_workspace and session.cwd and session.cwd.exists():
+        try:
+            shutil.rmtree(session.cwd)
+            logger.info("Cleaned up temp workspace: %s", session.cwd)
+        except OSError:
+            logger.warning("Failed to clean up workspace: %s", session.cwd)
+
+
 async def kill_session(name: str) -> bool:
     """Kill an agent session by name (case-insensitive). Returns True if found and killed."""
     resolved = _resolve_name(name)
@@ -115,6 +128,7 @@ async def kill_session(name: str) -> bool:
 
     update_job_status(session.job_id, JobStatus.CANCELLED)
     unregister_active_agent(session.job_id)
+    _cleanup_workspace(session)
     unregister_session(name)
     return True
 
@@ -186,7 +200,8 @@ async def run_interactive_agent(
     """
     from .agent import DEFAULT_ALLOWED_TOOLS
 
-    workspace = Path(cwd) if cwd else Path.cwd() / "workspace"
+    is_temp = cwd is None
+    workspace = Path(cwd) if cwd else Path.cwd() / "workspace" / name
     workspace.mkdir(parents=True, exist_ok=True)
 
     job = Job(
@@ -209,7 +224,13 @@ async def run_interactive_agent(
         opts.system_prompt = system_prompt
 
     client = ClaudeSDKClient(options=opts)
-    session = AgentSession(name=name, job_id=job.id, client=client)
+    session = AgentSession(
+        name=name,
+        job_id=job.id,
+        client=client,
+        cwd=workspace,
+        is_temp_workspace=is_temp,
+    )
     register_session(session)
 
     try:
@@ -285,6 +306,7 @@ async def run_interactive_agent(
                 await client.disconnect()
             except Exception:
                 pass
+            _cleanup_workspace(session)
             unregister_session(name)
 
     return job

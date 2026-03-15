@@ -22,6 +22,10 @@ uv add <package>
 
 # Add a dev-only dependency
 uv add --dev <package>
+
+# Set up local environment overrides (for service scripts)
+cp .env.example .env
+# Edit .env with your machine-specific paths (e.g. MCP_TELEGRAM_CLI)
 ```
 
 ## Common Commands

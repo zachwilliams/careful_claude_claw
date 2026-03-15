@@ -14,6 +14,7 @@ import httpx
 
 from .agent import run_agent
 from .agent_session import (
+    AgentSession,
     generate_name,
     get_session,
     kill_all_sessions,
@@ -32,7 +33,12 @@ TELEGRAM_SYSTEM_PROMPT = (
     "You are CarefulClaw, a personal AI assistant responding via Telegram. Respond concisely."
 )
 TELEGRAM_CONVERSATIONAL_TOOLS = [
-    "Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch",
+    "Read",
+    "Glob",
+    "Grep",
+    "Bash",
+    "WebSearch",
+    "WebFetch",
 ]
 
 
@@ -86,6 +92,21 @@ class TelegramBot:
         resp.raise_for_status()
         return resp.json().get("result", [])
 
+    async def get_file(self, file_id: str) -> dict:
+        """Get file metadata from Telegram (including file_path for download)."""
+        resp = await self._client.get(f"{self._base}/getFile", params={"file_id": file_id})
+        resp.raise_for_status()
+        return resp.json()["result"]
+
+    async def download_file(self, file_path: str, destination: Path) -> Path:
+        """Download a file from Telegram servers to a local path."""
+        url = f"{TELEGRAM_API}/file/bot{self.token}/{file_path}"
+        resp = await self._client.get(url)
+        resp.raise_for_status()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(resp.content)
+        return destination
+
     async def send_message(self, text: str, parse_mode: str | None = "Markdown") -> None:
         """Send a message, auto-splitting if over 4096 chars."""
         chunks = _split_message(text)
@@ -121,11 +142,40 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
     return chunks
 
 
+def _extract_file_info(msg: dict) -> tuple[str, str, str] | None:
+    """Extract (file_id, filename, media_type) from a Telegram message.
+
+    Supports document, photo, video, audio, voice, video_note.
+    Returns None if no attachment is present.
+    """
+    if "document" in msg:
+        doc = msg["document"]
+        return doc["file_id"], doc.get("file_name", "document"), "document"
+    if "photo" in msg:
+        # photos come as array of sizes; take the largest
+        photo = msg["photo"][-1]
+        return photo["file_id"], "photo.jpg", "photo"
+    if "video" in msg:
+        vid = msg["video"]
+        return vid["file_id"], vid.get("file_name", "video.mp4"), "video"
+    if "audio" in msg:
+        aud = msg["audio"]
+        return aud["file_id"], aud.get("file_name", "audio.mp3"), "audio"
+    if "voice" in msg:
+        voice = msg["voice"]
+        return voice["file_id"], "voice.ogg", "voice"
+    if "video_note" in msg:
+        vn = msg["video_note"]
+        return vn["file_id"], "video_note.mp4", "video_note"
+    return None
+
+
 class CommandRouter:
     """Routes incoming Telegram messages to handlers."""
 
     def __init__(self, bot: TelegramBot) -> None:
         self.bot = bot
+        self._pending_file: dict | None = None  # stored file info awaiting routing
         self._commands: dict[str, callable] = {
             "/help": self._handle_help,
             "/status": self._handle_status,
@@ -161,6 +211,8 @@ class CommandRouter:
             await self._handle_kill(text)
         elif cmd == "/reply":
             await self._handle_reply(text)
+        elif cmd == "/new":
+            await self._handle_new()
         else:
             # Free text -> spawn agent
             await self._spawn_agent(text)
@@ -188,6 +240,11 @@ class CommandRouter:
             "`/kill all`  — Kill all running tasks",
             "`/reply <name> <message>`  — Send input to a running task",
             "`@<name> <message>`  — Shorthand for /reply",
+            "`/new`  — Start a new task with a pending file",
+            "",
+            "*File attachments:*",
+            "Send a file with `@<name>` in the caption to route it",
+            "Send a file without a caption to be prompted for routing",
         ]
         await self.bot.send_message("\n".join(lines))
 
@@ -408,6 +465,134 @@ class CommandRouter:
         if session:
             session.task = task
 
+    async def handle_file_message(self, msg: dict) -> None:
+        """Route a file attachment to the appropriate agent."""
+        file_info = _extract_file_info(msg)
+        if not file_info:
+            return
+        file_id, file_name, media_type = file_info
+        caption = (msg.get("caption") or "").strip()
+
+        # Check for @name in caption
+        if caption.startswith("@"):
+            parts = caption.split(maxsplit=1)
+            target_name = parts[0][1:]
+            caption_text = parts[1] if len(parts) > 1 else ""
+            session = get_session(target_name)
+            if session:
+                await self._deliver_file_to_agent(
+                    session, file_id, file_name, media_type, caption_text
+                )
+            else:
+                await self.bot.send_message(f"No active task named `{target_name}`.")
+            return
+
+        # No @name — check active agents
+        sessions = list_sessions()
+        if not sessions:
+            # No agents running — spawn a new one with the file
+            await self._spawn_agent_with_file(file_id, file_name, media_type, caption)
+            return
+
+        # Active agents exist — ask which one
+        self._pending_file = {
+            "file_id": file_id,
+            "file_name": file_name,
+            "media_type": media_type,
+            "caption": caption,
+        }
+        lines = ["Which task should receive this file?"]
+        for s in sessions:
+            lines.append(f"  Reply `@{s.name}` to send to that task")
+        lines.append("  Reply `/new` to start a new task with this file")
+        await self.bot.send_message("\n".join(lines))
+
+    async def _deliver_file_to_agent(
+        self,
+        session: AgentSession,
+        file_id: str,
+        file_name: str,
+        media_type: str,
+        caption: str,
+    ) -> None:
+        """Download a file and deliver it to an agent's workspace."""
+        try:
+            tg_file = await self.bot.get_file(file_id)
+            tg_path = tg_file.get("file_path", "")
+            if not tg_path:
+                await self.bot.send_message("Could not retrieve file from Telegram.")
+                return
+
+            dest_dir = session.cwd or Path.cwd()
+            dest = dest_dir / file_name
+            # Deduplicate filename
+            counter = 1
+            while dest.exists():
+                stem = Path(file_name).stem
+                suffix = Path(file_name).suffix
+                dest = dest_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+            await self.bot.download_file(tg_path, dest)
+
+            # Tell the agent about the file
+            desc = f"File received ({media_type}): {dest.name}"
+            if caption:
+                desc += f"\nUser message: {caption}"
+            await send_to_agent(session.name, desc)
+            await self.bot.send_message(f"[{session.name}] File delivered: `{dest.name}`")
+        except Exception:
+            logger.exception("Failed to deliver file to agent %s", session.name)
+            await self.bot.send_message(f"Failed to deliver file to `{session.name}`.")
+
+    async def _spawn_agent_with_file(
+        self,
+        file_id: str,
+        file_name: str,
+        media_type: str,
+        caption: str,
+    ) -> None:
+        """Spawn a new agent and deliver a file to it."""
+        task_text = caption or f"Process this {media_type} file: {file_name}"
+        name = generate_name("T")
+        await self.bot.send_message(f"[{name}] Starting with file...")
+        bot = self.bot
+
+        async def on_message(msg: str) -> None:
+            await bot.send_message(msg)
+
+        bg_task = asyncio.create_task(
+            run_interactive_agent(
+                name=name,
+                task=task_text,
+                on_message=on_message,
+                agent_name=f"tg-{name}",
+                system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                allowed_tools=TELEGRAM_CONVERSATIONAL_TOOLS,
+            )
+        )
+        session = get_session(name)
+        if session:
+            session.task = bg_task
+
+        # Wait briefly for workspace to be created, then deliver file
+        await asyncio.sleep(0.5)
+        session = get_session(name)
+        if session:
+            await self._deliver_file_to_agent(session, file_id, file_name, media_type, caption)
+
+    async def _handle_new(self) -> None:
+        """Handle /new command — spawn a new agent with pending file."""
+        if not self._pending_file:
+            await self.bot.send_message("No pending file. Send a file first.")
+            return
+
+        pf = self._pending_file
+        self._pending_file = None
+        await self._spawn_agent_with_file(
+            pf["file_id"], pf["file_name"], pf["media_type"], pf["caption"]
+        )
+
 
 async def _run_and_reply(
     bot: TelegramBot,
@@ -472,6 +657,18 @@ async def run_telegram_listener() -> None:
                     # Security: only process messages from configured chat_id
                     if msg_chat_id != chat_id:
                         continue
+
+                    # Check for file attachments before text-only guard
+                    file_info = _extract_file_info(msg)
+                    if file_info:
+                        logger.info("Received file: %s (%s)", file_info[1], file_info[2])
+                        try:
+                            await router.handle_file_message(msg)
+                        except Exception:
+                            logger.exception("Error handling file message")
+                            await bot.send_message("Error processing your file.")
+                        continue
+
                     if not text:
                         continue
 

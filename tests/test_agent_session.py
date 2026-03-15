@@ -9,6 +9,7 @@ import careful_claude_claw.db as db_module
 from careful_claude_claw.agent_session import (
     AGENT_SESSIONS,
     AgentSession,
+    _cleanup_workspace,
     generate_name,
     get_session,
     kill_all_sessions,
@@ -219,3 +220,62 @@ async def test_send_to_agent_error():
 
     result = await send_to_agent("error-agent", "hello")
     assert result is False
+
+
+# --- workspace cleanup ---
+
+
+def test_cleanup_workspace_temp(tmp_path):
+    """Temp workspace should be deleted on cleanup."""
+    workspace = tmp_path / "workspace" / "T1"
+    workspace.mkdir(parents=True)
+    (workspace / "somefile.txt").write_text("data")
+
+    session = _make_session("T1")
+    session.cwd = workspace
+    session.is_temp_workspace = True
+
+    _cleanup_workspace(session)
+    assert not workspace.exists()
+
+
+def test_cleanup_workspace_project(tmp_path):
+    """Project workspace (is_temp_workspace=False) should NOT be deleted."""
+    workspace = tmp_path / "my_project"
+    workspace.mkdir(parents=True)
+    (workspace / "code.py").write_text("print('hi')")
+
+    session = _make_session("S1")
+    session.cwd = workspace
+    session.is_temp_workspace = False
+
+    _cleanup_workspace(session)
+    assert workspace.exists()
+    assert (workspace / "code.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_kill_session_cleans_workspace(tmp_path):
+    """Kill should trigger workspace cleanup for temp workspaces."""
+    from careful_claude_claw.models import Job
+
+    workspace = tmp_path / "workspace" / "K1"
+    workspace.mkdir(parents=True)
+    (workspace / "temp.txt").write_text("temp data")
+
+    job = Job(id="kill-cleanup-job", agent_name="test", task="test", started_at=datetime.now(UTC))
+    db_module.insert_job(job)
+    db_module.register_active_agent(job)
+
+    session = _make_session("K1")
+    session.job_id = "kill-cleanup-job"
+    session.cwd = workspace
+    session.is_temp_workspace = True
+    session.task = MagicMock()
+    session.task.done.return_value = False
+    session.task.cancel = MagicMock()
+    register_session(session)
+
+    result = await kill_session("K1")
+    assert result is True
+    assert not workspace.exists()
