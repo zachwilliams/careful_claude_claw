@@ -109,6 +109,37 @@ def test_list_sessions():
     assert names == {"a", "b"}
 
 
+# --- case-insensitive lookup ---
+
+
+def test_get_session_case_insensitive():
+    session = _make_session("T1")
+    register_session(session)
+    assert get_session("t1") is session
+    assert get_session("T1") is session
+
+
+@pytest.mark.asyncio
+async def test_kill_session_case_insensitive():
+    session = _make_session("T2")
+    session.client.interrupt = AsyncMock()
+    session.client.disconnect = AsyncMock()
+    register_session(session)
+    result = await kill_session("t2")
+    assert result is True
+    assert get_session("T2") is None
+
+
+@pytest.mark.asyncio
+async def test_send_to_agent_case_insensitive():
+    session = _make_session("T3")
+    session.client.query = AsyncMock()
+    register_session(session)
+    result = await send_to_agent("t3", "hello")
+    assert result is True
+    session.client.query.assert_awaited_once_with("hello")
+
+
 # --- kill_session ---
 
 

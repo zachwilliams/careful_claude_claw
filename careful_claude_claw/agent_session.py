@@ -67,8 +67,20 @@ def unregister_session(name: str) -> None:
     AGENT_SESSIONS.pop(name, None)
 
 
+def _resolve_name(name: str) -> str | None:
+    """Resolve a session name case-insensitively. Returns the canonical name or None."""
+    if name in AGENT_SESSIONS:
+        return name
+    name_lower = name.lower()
+    for key in AGENT_SESSIONS:
+        if key.lower() == name_lower:
+            return key
+    return None
+
+
 def get_session(name: str) -> AgentSession | None:
-    return AGENT_SESSIONS.get(name)
+    resolved = _resolve_name(name)
+    return AGENT_SESSIONS.get(resolved) if resolved else None
 
 
 def list_sessions() -> list[AgentSession]:
@@ -76,8 +88,12 @@ def list_sessions() -> list[AgentSession]:
 
 
 async def kill_session(name: str) -> bool:
-    """Kill an agent session by name. Returns True if found and killed."""
-    session = AGENT_SESSIONS.get(name)
+    """Kill an agent session by name (case-insensitive). Returns True if found and killed."""
+    resolved = _resolve_name(name)
+    if resolved is None:
+        return False
+    name = resolved
+    session = AGENT_SESSIONS[name]
     if session is None:
         return False
 
@@ -114,10 +130,11 @@ async def kill_all_sessions() -> int:
 
 
 async def send_to_agent(name: str, message: str) -> bool:
-    """Send a follow-up message to a running agent. Returns True if sent."""
-    session = AGENT_SESSIONS.get(name)
-    if session is None:
+    """Send a follow-up message to a running agent (case-insensitive). Returns True if sent."""
+    resolved = _resolve_name(name)
+    if resolved is None:
         return False
+    session = AGENT_SESSIONS[resolved]
 
     try:
         session.last_activity = datetime.now(UTC)
@@ -196,7 +213,8 @@ async def run_interactive_agent(
     register_session(session)
 
     try:
-        await client.connect(prompt=task)
+        await client.connect()
+        await client.query(task)
 
         result_text: str | None = None
         while True:

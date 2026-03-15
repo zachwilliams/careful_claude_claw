@@ -238,10 +238,10 @@ def project_status(name: str) -> None:
     if proj["description"]:
         console.print(f"  Description: {proj['description']}")
 
-    # Active agents for this project
+    # Active tasks for this project
     agents = [a for a in list_active_agents() if a.get("project_name") == name]
     if agents:
-        console.print(f"\n[bold]Active agents ({len(agents)}):[/bold]")
+        console.print(f"\n[bold]Active tasks ({len(agents)}):[/bold]")
         for a in agents:
             started = a["started_at"][:19] if a.get("started_at") else "?"
             console.print(f"  - {a['agent_name']} (since {started})")
@@ -379,12 +379,12 @@ def schedule_remove(name: str) -> None:
 
 @cli.command()
 def status() -> None:
-    """Show active agents and recent activity."""
+    """Show active tasks and recent activity."""
     init_db()
 
     agents = list_active_agents()
     if agents:
-        table = Table(title="Active Agents")
+        table = Table(title="Active Tasks")
         table.add_column("Agent", style="cyan")
         table.add_column("Project", style="magenta")
         table.add_column("Task")
@@ -409,7 +409,7 @@ def status() -> None:
             )
         console.print(table)
     else:
-        console.print("[dim]No active agents.[/dim]")
+        console.print("[dim]No active tasks.[/dim]")
 
     console.print()
 

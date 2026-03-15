@@ -133,7 +133,7 @@ class CommandRouter:
             "/projects": self._handle_projects,
             "/skills": self._handle_skills,
             "/schedules": self._handle_schedules,
-            "/agents": self._handle_agents,
+            "/tasks": self._handle_tasks,
         }
 
     async def handle_message(self, text: str) -> None:
@@ -170,23 +170,23 @@ class CommandRouter:
             "*CarefulClaw Commands*",
             "",
             "*Direct commands* (instant response):",
-            "`/status`  — Active agents + recent jobs",
-            "`/agents`  — List active agent sessions",
+            "`/status`  — Active tasks + recent jobs",
+            "`/tasks`  — List active tasks",
             "`/jobs`  — Last 10 jobs with status",
             "`/projects`  — Registered projects",
             "`/skills`  — Available skills (global + per-project)",
             "`/schedules`  — Scheduled tasks with cron expressions",
             "`/help`  — This message",
             "",
-            "*Agent commands* (run in background):",
+            "*Task commands* (run in background):",
             "`/run <skill>`  — Run a named skill",
             "`/run <skill> --project <name>`  — Run skill with project context",
             "Free text  — Treated as a task, spawns an agent",
             "",
-            "*Interactive agent commands:*",
-            "`/kill <name>`  — Kill a running agent",
-            "`/kill all`  — Kill all running agents",
-            "`/reply <name> <message>`  — Send input to a running agent",
+            "*Active task commands:*",
+            "`/kill <name>`  — Kill a running task",
+            "`/kill all`  — Kill all running tasks",
+            "`/reply <name> <message>`  — Send input to a running task",
             "`@<name> <message>`  — Shorthand for /reply",
         ]
         await self.bot.send_message("\n".join(lines))
@@ -197,11 +197,11 @@ class CommandRouter:
 
         lines = []
         if sessions:
-            lines.append(f"*Active Agents ({len(sessions)})*")
+            lines.append(f"*Active Tasks ({len(sessions)})*")
             for s in sessions:
                 lines.append(f"  `{s.name}` (job: {s.job_id[:8]})")
         else:
-            lines.append("No active agents.")
+            lines.append("No active tasks.")
 
         lines.append("")
         if jobs:
@@ -272,13 +272,13 @@ class CommandRouter:
 
         await self.bot.send_message("\n".join(lines))
 
-    async def _handle_agents(self) -> None:
+    async def _handle_tasks(self) -> None:
         sessions = list_sessions()
         if not sessions:
-            await self.bot.send_message("No active agent sessions.")
+            await self.bot.send_message("No active tasks.")
             return
 
-        lines = [f"*Active Agent Sessions ({len(sessions)})*"]
+        lines = [f"*Active Tasks ({len(sessions)})*"]
         for s in sessions:
             age = datetime.now(UTC) - s.created_at
             mins = int(age.total_seconds() // 60)
@@ -292,15 +292,15 @@ class CommandRouter:
             return
 
         target = parts[1].strip()
-        if target == "all":
+        if target.lower() == "all":
             count = await kill_all_sessions()
-            await self.bot.send_message(f"Killed {count} agent(s).")
+            await self.bot.send_message(f"Killed {count} task(s).")
         else:
             killed = await kill_session(target)
             if killed:
-                await self.bot.send_message(f"Killed agent `{target}`.")
+                await self.bot.send_message(f"Killed task `{target}`.")
             else:
-                await self.bot.send_message(f"No active agent named `{target}`.")
+                await self.bot.send_message(f"No active task named `{target}`.")
 
     async def _handle_reply(self, text: str) -> None:
         parts = text.split(maxsplit=2)
@@ -312,7 +312,7 @@ class CommandRouter:
         message = parts[2]
         sent = await send_to_agent(name, message)
         if not sent:
-            await self.bot.send_message(f"No active agent named `{name}`.")
+            await self.bot.send_message(f"No active task named `{name}`.")
 
     async def _handle_at_reply(self, text: str) -> None:
         """Handle @name message routing."""
@@ -329,7 +329,7 @@ class CommandRouter:
         message = parts[1]
         sent = await send_to_agent(name, message)
         if not sent:
-            await self.bot.send_message(f"No active agent named `{name}`.")
+            await self.bot.send_message(f"No active task named `{name}`.")
 
     async def _handle_run(self, text: str) -> None:
         """Parse /run <skill> [--project <name>] and spawn an agent."""

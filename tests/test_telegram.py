@@ -148,7 +148,7 @@ async def test_status_no_agents(router, mock_bot):
     await router.handle_message("/status")
     mock_bot.send_message.assert_called_once()
     msg = mock_bot.send_message.call_args[0][0]
-    assert "No active agents" in msg
+    assert "No active tasks" in msg
 
 
 @pytest.mark.asyncio
@@ -257,26 +257,26 @@ async def test_empty_whitespace_message(router, mock_bot):
     mock_bot.send_message.assert_not_called()
 
 
-# --- /agents ---
+# --- /tasks ---
 
 
 @pytest.mark.asyncio
-async def test_agents_empty(router, mock_bot):
-    await router.handle_message("/agents")
+async def test_tasks_empty(router, mock_bot):
+    await router.handle_message("/tasks")
     msg = mock_bot.send_message.call_args[0][0]
-    assert "No active agent sessions" in msg
+    assert "No active tasks" in msg
 
 
 @pytest.mark.asyncio
-async def test_agents_with_sessions(router, mock_bot):
+async def test_tasks_with_sessions(router, mock_bot):
     client = MagicMock()
     session = AgentSession(name="task-1", job_id="j1", client=client)
     register_session(session)
 
-    await router.handle_message("/agents")
+    await router.handle_message("/tasks")
     msg = mock_bot.send_message.call_args[0][0]
     assert "task-1" in msg
-    assert "Active Agent Sessions (1)" in msg
+    assert "Active Tasks (1)" in msg
 
 
 # --- /kill ---
@@ -306,7 +306,7 @@ async def test_kill_not_found(router, mock_bot):
         mock_kill.return_value = False
         await router.handle_message("/kill nope")
         msg = mock_bot.send_message.call_args[0][0]
-        assert "No active agent" in msg
+        assert "No active task" in msg
 
 
 @pytest.mark.asyncio
@@ -354,7 +354,7 @@ async def test_reply_agent_not_found(router, mock_bot):
         mock_send.return_value = False
         await router.handle_message("/reply nope hello")
         msg = mock_bot.send_message.call_args[0][0]
-        assert "No active agent" in msg
+        assert "No active task" in msg
 
 
 # --- @name routing ---
@@ -374,7 +374,7 @@ async def test_at_reply_agent_not_found(router, mock_bot):
         mock_send.return_value = False
         await router.handle_message("@nope hello")
         msg = mock_bot.send_message.call_args[0][0]
-        assert "No active agent" in msg
+        assert "No active task" in msg
 
 
 @pytest.mark.asyncio
@@ -395,7 +395,7 @@ async def test_status_with_sessions(router, mock_bot):
 
     await router.handle_message("/status")
     msg = mock_bot.send_message.call_args[0][0]
-    assert "Active Agents" in msg
+    assert "Active Tasks" in msg
     assert "task-1" in msg
 
 
@@ -408,5 +408,5 @@ async def test_help_includes_new_commands(router, mock_bot):
     msg = mock_bot.send_message.call_args[0][0]
     assert "/kill" in msg
     assert "/reply" in msg
-    assert "/agents" in msg
+    assert "/tasks" in msg
     assert "@<name>" in msg
