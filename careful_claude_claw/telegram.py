@@ -432,7 +432,7 @@ class CommandRouter:
             return
 
         name = generate_name("S")
-        await self.bot.send_message(f"[{name}] Starting skill `{skill_name}`...")
+        await self.bot.send_message(f"@{name}: Starting skill `{skill_name}`...")
         bot = self.bot
 
         async def on_message(msg: str) -> None:
@@ -454,7 +454,7 @@ class CommandRouter:
     async def _spawn_agent(self, text: str) -> None:
         """Spawn a background agent for free-text tasks."""
         name = generate_name("T")
-        await self.bot.send_message(f"[{name}] Starting...")
+        await self.bot.send_message(f"@{name}: Starting...")
         bot = self.bot
 
         async def on_message(msg: str) -> None:
@@ -549,7 +549,7 @@ class CommandRouter:
             if caption:
                 desc += f"\nUser message: {caption}"
             await send_to_agent(session.name, desc)
-            await self.bot.send_message(f"[{session.name}] File delivered: `{dest.name}`")
+            await self.bot.send_message(f"@{session.name}: File delivered: `{dest.name}`")
         except Exception:
             logger.exception("Failed to deliver file to agent %s", session.name)
             await self.bot.send_message(f"Failed to deliver file to `{session.name}`.")
@@ -564,7 +564,7 @@ class CommandRouter:
         """Spawn a new agent and deliver a file to it."""
         task_text = caption or f"Process this {media_type} file: {file_name}"
         name = generate_name("T")
-        await self.bot.send_message(f"[{name}] Starting with file...")
+        await self.bot.send_message(f"@{name}: Starting with file...")
         bot = self.bot
 
         async def on_message(msg: str) -> None:

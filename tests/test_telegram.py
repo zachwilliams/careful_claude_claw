@@ -241,7 +241,7 @@ async def test_free_text_spawns_agent(router, mock_bot):
         "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
     ) as mock_run:
         await router.handle_message("what time is it?")
-        mock_bot.send_message.assert_called_with("[T1] Starting...")
+        mock_bot.send_message.assert_called_with("@T1: Starting...")
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["task"] == "what time is it?"
         assert mock_run.call_args.kwargs["name"] == "T1"

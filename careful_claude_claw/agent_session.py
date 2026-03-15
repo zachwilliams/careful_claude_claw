@@ -244,12 +244,12 @@ async def run_interactive_agent(
                 if isinstance(msg, ResultMessage):
                     result_text = msg.result
                     if result_text:
-                        await on_message(f"[{name}] {result_text}")
+                        await on_message(f"@{name}: {result_text}")
                     got_result = True
                 elif isinstance(msg, AssistantMessage):
                     text = _extract_assistant_text(msg)
                     if text:
-                        await on_message(f"[{name}] {text}")
+                        await on_message(f"@{name}: {text}")
 
             # Iterator exhausted. If we got a result, wait for follow-up
             if got_result:
@@ -258,7 +258,7 @@ async def run_interactive_agent(
                     idle = (datetime.now(UTC) - session.last_activity).total_seconds()
                     if idle >= IDLE_TIMEOUT_SECONDS:
                         logger.info("Agent %s idle timeout after %ds", name, idle)
-                        await on_message(f"[{name}] Session closed (idle timeout).")
+                        await on_message(f"@{name}: Session closed (idle timeout).")
                         break
                     if name not in AGENT_SESSIONS:
                         return execution
@@ -275,20 +275,20 @@ async def run_interactive_agent(
         update_execution(execution)
 
         if not result_text:
-            await on_message(f"[{name}] Done.")
+            await on_message(f"@{name}: Done.")
 
     except asyncio.CancelledError:
         execution.status = JobStatus.CANCELLED
         execution.ended_at = datetime.now(UTC)
         update_execution(execution)
-        await on_message(f"[{name}] Cancelled.")
+        await on_message(f"@{name}: Cancelled.")
     except (CLINotFoundError, CLIConnectionError, Exception) as exc:
         logger.exception("Interactive agent %s failed", name)
         execution.status = JobStatus.FAILED
         execution.error = str(exc)
         execution.ended_at = datetime.now(UTC)
         update_execution(execution)
-        await on_message(f"[{name}] Failed: {exc}")
+        await on_message(f"@{name}: Failed: {exc}")
     finally:
         unregister_active_agent(execution.id)
         if name in AGENT_SESSIONS:
