@@ -12,6 +12,14 @@
 set -euo pipefail
 
 CLAW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source local environment overrides (gitignored)
+if [[ -f "$CLAW_DIR/.env" ]]; then
+    set -a
+    source "$CLAW_DIR/.env"
+    set +a
+fi
+
 PID_DIR="$CLAW_DIR/.pids"
 LOG_DIR="$CLAW_DIR/.logs"
 
@@ -50,7 +58,7 @@ cmd_start() {
     # 1. mcp-telegram daemon
     if _is_running "$TG_PID_FILE"; then
         echo "  [ok] telegram daemon (already running, pid $(_pid_of "$TG_PID_FILE"))"
-    else
+    elif command -v "$TG_CLI" &>/dev/null; then
         "$TG_CLI" daemon start 2>&1 | tail -1
         sleep 1
         if _is_running "$TG_PID_FILE"; then
@@ -58,6 +66,8 @@ cmd_start() {
         else
             echo "  [!!] telegram daemon (failed to start)"
         fi
+    else
+        echo "  [!!] telegram daemon (skipped — '$TG_CLI' not found; set MCP_TELEGRAM_CLI or install tg)"
     fi
 
     # 2. claw (scheduler + telegram listener)
@@ -97,8 +107,15 @@ cmd_stop() {
 
     # 2. telegram daemon
     if _is_running "$TG_PID_FILE"; then
-        "$TG_CLI" daemon stop 2>&1 | tail -1
-        echo "  [ok] telegram daemon stopped"
+        if command -v "$TG_CLI" &>/dev/null; then
+            "$TG_CLI" daemon stop 2>&1 | tail -1
+            echo "  [ok] telegram daemon stopped"
+        else
+            local pid
+            pid=$(_pid_of "$TG_PID_FILE")
+            kill "$pid" 2>/dev/null && echo "  [ok] telegram daemon stopped (pid $pid, killed directly)"
+            rm -f "$TG_PID_FILE"
+        fi
     else
         echo "  [--] telegram daemon (not running)"
     fi

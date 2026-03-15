@@ -21,5 +21,8 @@ htmlcov/
 .pids/
 .logs/
 
+# Local environment overrides
+.env
+
 # MCP config (may contain credentials)
 .mcp.json
