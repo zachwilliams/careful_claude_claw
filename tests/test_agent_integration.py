@@ -1,7 +1,14 @@
 import pytest
 
+import careful_claude_claw.db as db_module
 from careful_claude_claw.agent import run_agent
 from careful_claude_claw.models import JobStatus
+
+
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    db_module.init_db()
 
 
 @pytest.mark.integration

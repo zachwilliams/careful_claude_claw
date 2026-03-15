@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+#
+# claw-services — manage CarefulClaw background services
+#
+# Usage:
+#   claw-services start   Start all services
+#   claw-services stop    Stop all services
+#   claw-services status  Show service status
+#   claw-services logs    Tail all logs
+#
+
+set -euo pipefail
+
+CLAW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PID_DIR="$CLAW_DIR/.pids"
+LOG_DIR="$CLAW_DIR/.logs"
+
+TG_CLI="/Users/zach/projects/mcp-telegram/.venv/bin/tg"
+TG_PID_FILE="$HOME/.mcp-telegram/daemon.pid"
+
+mkdir -p "$PID_DIR" "$LOG_DIR"
+
+# --- Helpers ---
+
+_is_running() {
+    local pid_file="$1"
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid=$(cat "$pid_file")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+_pid_of() {
+    local pid_file="$1"
+    if [[ -f "$pid_file" ]]; then
+        cat "$pid_file"
+    fi
+}
+
+# --- Commands ---
+
+cmd_start() {
+    echo "Starting CarefulClaw services..."
+    echo
+
+    # 1. mcp-telegram daemon
+    if _is_running "$TG_PID_FILE"; then
+        echo "  [ok] telegram daemon (already running, pid $(_pid_of "$TG_PID_FILE"))"
+    else
+        "$TG_CLI" daemon start 2>&1 | tail -1
+        sleep 1
+        if _is_running "$TG_PID_FILE"; then
+            echo "  [ok] telegram daemon (pid $(_pid_of "$TG_PID_FILE"))"
+        else
+            echo "  [!!] telegram daemon (failed to start)"
+        fi
+    fi
+
+    # 2. claw (scheduler + telegram listener)
+    if _is_running "$PID_DIR/claw.pid"; then
+        echo "  [ok] claw orchestrator (already running, pid $(_pid_of "$PID_DIR/claw.pid"))"
+    else
+        cd "$CLAW_DIR"
+        nohup uv run claw start --telegram \
+            >> "$LOG_DIR/claw.log" 2>&1 &
+        local claw_pid=$!
+        echo "$claw_pid" > "$PID_DIR/claw.pid"
+        sleep 1
+        if _is_running "$PID_DIR/claw.pid"; then
+            echo "  [ok] claw orchestrator (pid $claw_pid)"
+        else
+            echo "  [!!] claw orchestrator (failed to start — check $LOG_DIR/claw.log)"
+        fi
+    fi
+
+    echo
+    echo "Logs: $LOG_DIR/"
+}
+
+cmd_stop() {
+    echo "Stopping CarefulClaw services..."
+    echo
+
+    # 1. claw orchestrator
+    if _is_running "$PID_DIR/claw.pid"; then
+        local pid
+        pid=$(_pid_of "$PID_DIR/claw.pid")
+        kill "$pid" 2>/dev/null && echo "  [ok] claw orchestrator stopped (pid $pid)"
+        rm -f "$PID_DIR/claw.pid"
+    else
+        echo "  [--] claw orchestrator (not running)"
+    fi
+
+    # 2. telegram daemon
+    if _is_running "$TG_PID_FILE"; then
+        "$TG_CLI" daemon stop 2>&1 | tail -1
+        echo "  [ok] telegram daemon stopped"
+    else
+        echo "  [--] telegram daemon (not running)"
+    fi
+
+    echo
+}
+
+cmd_status() {
+    echo "CarefulClaw Services"
+    echo "--------------------"
+
+    # telegram daemon
+    if _is_running "$TG_PID_FILE"; then
+        echo "  telegram daemon    UP   (pid $(_pid_of "$TG_PID_FILE"))"
+    else
+        echo "  telegram daemon    DOWN"
+    fi
+
+    # claw orchestrator
+    if _is_running "$PID_DIR/claw.pid"; then
+        echo "  claw orchestrator  UP   (pid $(_pid_of "$PID_DIR/claw.pid"))"
+    else
+        echo "  claw orchestrator  DOWN"
+    fi
+
+    echo
+}
+
+cmd_logs() {
+    local files=()
+    [[ -f "$LOG_DIR/claw.log" ]] && files+=("$LOG_DIR/claw.log")
+    [[ -f "$HOME/.mcp-telegram/daemon.log" ]] && files+=("$HOME/.mcp-telegram/daemon.log")
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "No log files found."
+        return
+    fi
+
+    tail -f "${files[@]}"
+}
+
+# --- Main ---
+
+case "${1:-}" in
+    start)  cmd_start ;;
+    stop)   cmd_stop ;;
+    status) cmd_status ;;
+    logs)   cmd_logs ;;
+    *)
+        echo "Usage: claw-services {start|stop|status|logs}"
+        exit 1
+        ;;
+esac

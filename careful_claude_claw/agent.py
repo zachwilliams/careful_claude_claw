@@ -3,17 +3,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from claude_agent_sdk import (
+    ClaudeAgentOptions,
     CLIConnectionError,
     CLINotFoundError,
-    ClaudeAgentOptions,
     ResultMessage,
     query,
 )
 
-from .db import insert_job, update_job
+from .db import insert_job, register_active_agent, unregister_active_agent, update_job
 from .models import Job, JobStatus
 
 DEFAULT_TASK = "List all the active MCP connections you have."
+
+DEFAULT_ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 
 
 async def run_agent(
@@ -24,6 +26,8 @@ async def run_agent(
     cwd: str | None = None,
     system_prompt: str | dict | None = None,
     setting_sources: list[str] | None = None,
+    project_name: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> Job:
     """Spawn a Claude agent for the given task, with retry on failure."""
     workspace = Path(cwd) if cwd else Path.cwd() / "workspace"
@@ -33,6 +37,7 @@ async def run_agent(
     job = Job(
         agent_name=agent_name,
         task=task,
+        project_name=project_name,
         started_at=datetime.now(UTC),
         status=JobStatus.PENDING,
     )
@@ -42,12 +47,14 @@ async def run_agent(
         job.attempt = attempt
         job.status = JobStatus.RUNNING
         update_job(job)
+        register_active_agent(job)
 
         try:
             result_text: str | None = None
+            tools = allowed_tools or DEFAULT_ALLOWED_TOOLS
             opts = ClaudeAgentOptions(
                 cwd=cwd,
-                allowed_tools=["Read", "Glob", "Grep"],
+                allowed_tools=tools,
                 max_turns=10,
             )
             if system_prompt is not None:
@@ -66,6 +73,7 @@ async def run_agent(
             job.output = result_text or ""
             job.ended_at = datetime.now(UTC)
             update_job(job)
+            unregister_active_agent(job.id)
             return job
 
         except (CLINotFoundError, CLIConnectionError, Exception) as exc:
@@ -76,5 +84,6 @@ async def run_agent(
                 job.status = JobStatus.FAILED
                 job.ended_at = datetime.now(UTC)
                 update_job(job)
+                unregister_active_agent(job.id)
 
     return job

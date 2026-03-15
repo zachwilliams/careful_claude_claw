@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 
-import careful_claude_claw.db as db_module
 import pytest
 
+import careful_claude_claw.db as db_module
 from careful_claude_claw.models import Job, JobStatus
 
 
@@ -15,9 +15,7 @@ def isolated_db(tmp_path, monkeypatch):
 
 def test_init_db_creates_jobs_table():
     with db_module.get_connection() as conn:
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         names = [t["name"] for t in tables]
     assert "jobs" in names
 

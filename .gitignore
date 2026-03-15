@@ -16,3 +16,7 @@ dist/
 # Coverage
 .coverage
 htmlcov/
+
+# Runtime
+.pids/
+.logs/

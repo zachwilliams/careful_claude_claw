@@ -4,7 +4,7 @@ Project instructions and conventions for Claude Code.
 
 ## Project Overview
 
-Security-first Python orchestrator that uses the Claude Code Agent SDK to spawn Claude Code as the execution engine for autonomous, scheduled, and event-driven AI workflows. See `plan.md` for the full architecture.
+Security-first Python platform for managing Claude Code agents across messaging interfaces, scheduled tasks, and the command line. Uses the Claude Code Agent SDK to spawn agents as the execution engine. See `plan.md` for the full architecture and roadmap.
 
 ## Environment Setup
 
@@ -30,6 +30,15 @@ uv add --dev <package>
 # Run the CLI
 uv run claw
 
+# Run a one-shot agent task
+uv run claw run --task "..." --project <name> --skill <name>
+
+# Start scheduler + Telegram listener
+uv run claw start
+
+# Show status
+uv run claw status
+
 # Run tests
 uv run pytest
 
@@ -49,21 +58,30 @@ uv run ruff format .
 ├── plan.md                          # Full architecture and roadmap
 ├── pyproject.toml                   # Project metadata and dependencies (managed by uv)
 ├── pyrightconfig.json               # Pyright/pylance type checker config
-├── security.yaml                    # Single source of truth for all agent permissions
+├── skills/                          # Global skills directory (*.md files)
+├── bin/
+│   └── claw-services                # Service management script
 ├── careful_claude_claw/             # Main application package
 │   ├── __init__.py
-│   ├── cli.py                       # CLI entrypoint (click)
-│   ├── config.py                    # Configuration management (pydantic-settings)
-│   ├── models.py                    # Data models (events, jobs, memory, sessions)
-│   ├── db.py                        # SQLite operations
-│   ├── agent.py                     # Agent SDK spawner + retry logic
-│   ├── scheduler.py                 # Cron scheduler (APScheduler)
-│   ├── webhook.py                   # Webhook listener (FastAPI)
-│   ├── queue.py                     # Event queue
+│   ├── cli.py                       # CLI entrypoint (click) — run, jobs, status, projects, skills, schedules, start, telegram
+│   ├── agent.py                     # One-shot agent spawner (query) + retry logic
+│   ├── agent_session.py             # Interactive agent sessions (ClaudeSDKClient) + session registry
+│   ├── models.py                    # Pydantic models: Job, Project, Skill, Schedule
+│   ├── db.py                        # SQLite operations: jobs, projects, schedules, active_agents
+│   ├── scheduler.py                 # APScheduler cron wrapper
+│   ├── skills.py                    # Skill discovery from skills/ directories
+│   ├── telegram.py                  # Telegram bot: long-polling, command routing, agent spawning
 │   └── security/
-│       ├── __init__.py
-│       └── compiler.py              # security.yaml → .claude/settings.json + .mcp.json
+│       └── __init__.py              # Placeholder — security policy enforcement (Phase 5)
 └── tests/                           # Test suite (mirrors careful_claude_claw/ structure)
+    ├── test_models.py
+    ├── test_db.py
+    ├── test_projects.py
+    ├── test_skills.py
+    ├── test_scheduler.py
+    ├── test_agent_session.py
+    ├── test_telegram.py
+    └── test_agent_integration.py    # Integration test (requires live Claude CLI)
 ```
 
 ## Code Conventions
@@ -72,15 +90,16 @@ uv run ruff format .
 - Follow PEP 8; enforced via `ruff`
 - Use type hints throughout
 - Use `pydantic` models for all data structures
-- Keep security compilation logic isolated in `careful_claude_claw/security/`
-- All agent permission policy lives in `security.yaml`; never hardcode permissions elsewhere
+- Skills are markdown files in `skills/` (global) or `<project>/skills/` (project-scoped)
+- Security policy will live in `security.yaml`; never hardcode permissions elsewhere
 
 ## Testing
 
 - Use `pytest` for all tests
 - Place tests in `tests/` mirroring the `careful_claude_claw/` structure
 - Name test files `test_<module>.py` and test functions `test_<behavior>`
-- Unit tests on models/config/security compiler; integration tests on agent/scheduler/webhook
+- Unit tests on models/config/security; integration tests on agent (marked `@pytest.mark.integration`)
+- DB tests use `monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")` + `autouse` fixture
 
 ## Dependencies
 
