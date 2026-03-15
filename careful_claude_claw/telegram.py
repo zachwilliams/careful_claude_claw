@@ -39,6 +39,7 @@ TELEGRAM_CONVERSATIONAL_TOOLS = [
     "Bash",
     "WebSearch",
     "WebFetch",
+    "mcp__*",
 ]
 
 

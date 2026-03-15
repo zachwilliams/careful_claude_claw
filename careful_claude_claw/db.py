@@ -20,8 +20,6 @@ def init_db() -> None:
         conn.execute("DROP TABLE IF EXISTS jobs")
         conn.execute("DROP TABLE IF EXISTS executions")
         conn.execute("DROP TABLE IF EXISTS active_agents")
-        conn.execute("DROP TABLE IF EXISTS projects")
-        conn.execute("DROP TABLE IF EXISTS schedules")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
