@@ -14,7 +14,7 @@ def isolated_db(tmp_path, monkeypatch):
 @pytest.mark.integration
 async def test_agent_follows_system_prompt(tmp_path):
     """Verify the agent follows injected system prompt instructions."""
-    job = await run_agent(
+    execution = await run_agent(
         agent_name="integration-test",
         task="Say hello.",
         cwd=str(tmp_path),
@@ -30,7 +30,7 @@ async def test_agent_follows_system_prompt(tmp_path):
         max_attempts=1,
     )
 
-    assert job.status == JobStatus.SUCCESS, f"Agent failed: {job.error}"
-    assert "CLAW_VERIFIED" in job.output, (
-        f"Agent did not follow system prompt instructions. Output: {job.output}"
+    assert execution.status == JobStatus.SUCCESS, f"Agent failed: {execution.error}"
+    assert "CLAW_VERIFIED" in execution.output, (
+        f"Agent did not follow system prompt instructions. Output: {execution.output}"
     )

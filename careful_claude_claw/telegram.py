@@ -23,7 +23,7 @@ from .agent_session import (
     run_interactive_agent,
     send_to_agent,
 )
-from .db import init_db, list_jobs, list_projects, list_schedules
+from .db import init_db, list_executions, list_jobs
 from .skills import discover_skills, get_skill
 
 logger = logging.getLogger(__name__)
@@ -180,9 +180,8 @@ class CommandRouter:
             "/help": self._handle_help,
             "/status": self._handle_status,
             "/jobs": self._handle_jobs,
-            "/projects": self._handle_projects,
+            "/runs": self._handle_runs,
             "/skills": self._handle_skills,
-            "/schedules": self._handle_schedules,
             "/tasks": self._handle_tasks,
         }
 
@@ -222,17 +221,15 @@ class CommandRouter:
             "*CarefulClaw Commands*",
             "",
             "*Direct commands* (instant response):",
-            "`/status`  — Active tasks + recent jobs",
+            "`/status`  — Active tasks + recent executions",
             "`/tasks`  — List active tasks",
-            "`/jobs`  — Last 10 jobs with status",
-            "`/projects`  — Registered projects",
-            "`/skills`  — Available skills (global + per-project)",
-            "`/schedules`  — Scheduled tasks with cron expressions",
+            "`/jobs`  — Job definitions",
+            "`/runs`  — Recent execution history",
+            "`/skills`  — Available skills",
             "`/help`  — This message",
             "",
             "*Task commands* (run in background):",
             "`/run <skill>`  — Run a named skill",
-            "`/run <skill> --project <name>`  — Run skill with project context",
             "Free text  — Treated as a task, spawns an agent",
             "",
             "*Active task commands:*",
@@ -250,52 +247,53 @@ class CommandRouter:
 
     async def _handle_status(self) -> None:
         sessions = list_sessions()
-        jobs = list_jobs(limit=5)
+        executions = list_executions(limit=5)
 
         lines = []
         if sessions:
             lines.append(f"*Active Tasks ({len(sessions)})*")
             for s in sessions:
-                lines.append(f"  `{s.name}` (job: {s.job_id[:8]})")
+                lines.append(f"  `{s.name}` (exec: {s.execution_id[:8]})")
         else:
             lines.append("No active tasks.")
 
         lines.append("")
-        if jobs:
-            lines.append("*Recent Jobs*")
-            for j in jobs:
-                status = j["status"]
-                agent = j["agent_name"]
+        if executions:
+            lines.append("*Recent Executions*")
+            for e in executions:
+                status = e["status"]
+                agent = e["agent_name"]
                 lines.append(f"  {status} — {agent}")
         else:
-            lines.append("No recent jobs.")
+            lines.append("No recent executions.")
 
         await self.bot.send_message("\n".join(lines))
 
     async def _handle_jobs(self) -> None:
-        jobs = list_jobs(limit=10)
+        jobs = list_jobs()
         if not jobs:
-            await self.bot.send_message("No jobs found.")
+            await self.bot.send_message("No jobs defined.")
             return
 
-        lines = ["*Recent Jobs*"]
+        lines = ["*Jobs*"]
         for j in jobs:
-            task_preview = (j["task"] or "")[:40]
-            proj = f" ({j['project_name']})" if j.get("project_name") else ""
-            lines.append(f"  {j['status']} — {j['agent_name']}{proj}: {task_preview}")
+            task_or_skill = j["skill_name"] or (j["task"] or "")[:40]
+            cron = f" `{j['cron_expr']}`" if j.get("cron_expr") else ""
+            enabled = " [off]" if not j["enabled"] else ""
+            lines.append(f"  {j['name']}{cron}{enabled}: {task_or_skill}")
 
         await self.bot.send_message("\n".join(lines))
 
-    async def _handle_projects(self) -> None:
-        projects = list_projects()
-        if not projects:
-            await self.bot.send_message("No projects registered.")
+    async def _handle_runs(self) -> None:
+        executions = list_executions(limit=10)
+        if not executions:
+            await self.bot.send_message("No executions found.")
             return
 
-        lines = ["*Projects*"]
-        for p in projects:
-            desc = f" — {p['description']}" if p.get("description") else ""
-            lines.append(f"  {p['name']} [{p['status']}]{desc}")
+        lines = ["*Recent Executions*"]
+        for e in executions:
+            job = f" ({e['job_name']})" if e.get("job_name") else ""
+            lines.append(f"  {e['status']} — {e['agent_name']}{job}")
 
         await self.bot.send_message("\n".join(lines))
 
@@ -307,25 +305,8 @@ class CommandRouter:
 
         lines = ["*Skills*"]
         for s in found:
-            scope = f"[{s.scope.value}]"
-            proj = f" ({s.project_name})" if s.project_name else ""
             desc = f" — {s.description[:60]}" if s.description else ""
-            lines.append(f"  {s.name} {scope}{proj}{desc}")
-
-        await self.bot.send_message("\n".join(lines))
-
-    async def _handle_schedules(self) -> None:
-        schedules = list_schedules()
-        if not schedules:
-            await self.bot.send_message("No schedules configured.")
-            return
-
-        lines = ["*Schedules*"]
-        for s in schedules:
-            enabled = "on" if s["enabled"] else "off"
-            task_or_skill = s["skill_name"] or (s["task"] or "")[:40]
-            proj = f" ({s['project_name']})" if s.get("project_name") else ""
-            lines.append(f"  {s['name']} [{enabled}] `{s['cron_expr']}` {task_or_skill}{proj}")
+            lines.append(f"  {s.name}{desc}")
 
         await self.bot.send_message("\n".join(lines))
 
@@ -389,20 +370,15 @@ class CommandRouter:
             await self.bot.send_message(f"No active task named `{name}`.")
 
     async def _handle_run(self, text: str) -> None:
-        """Parse /run <skill> [--project <name>] and spawn an agent."""
+        """Parse /run <skill> and spawn an agent."""
         parts = text.split()
         if len(parts) < 2:
-            await self.bot.send_message("Usage: /run <skill> [--project <name>]")
+            await self.bot.send_message("Usage: /run <skill>")
             return
 
         skill_name = parts[1]
-        project_name = None
-        if "--project" in parts:
-            idx = parts.index("--project")
-            if idx + 1 < len(parts):
-                project_name = parts[idx + 1]
 
-        skill = get_skill(skill_name, project_name)
+        skill = get_skill(skill_name)
         if not skill:
             await self.bot.send_message(f"Skill not found: {skill_name}")
             return
@@ -412,14 +388,6 @@ class CommandRouter:
         except OSError:
             await self.bot.send_message(f"Cannot read skill file: {skill.file_path}")
             return
-
-        cwd = None
-        if project_name:
-            from .db import get_project
-
-            proj = get_project(project_name)
-            if proj:
-                cwd = proj["path"]
 
         name = generate_name("S")
         await self.bot.send_message(f"[{name}] Starting skill `{skill_name}`...")
@@ -434,8 +402,7 @@ class CommandRouter:
                 task=task,
                 on_message=on_message,
                 agent_name=f"tg-{name}",
-                project_name=project_name,
-                cwd=cwd,
+                job_name=f"skill-{skill_name}",
             )
         )
         session = get_session(name)
@@ -598,25 +565,23 @@ async def _run_and_reply(
     bot: TelegramBot,
     task: str,
     agent_name: str,
-    project_name: str | None = None,
     cwd: str | None = None,
     system_prompt: str | None = None,
 ) -> None:
     """Run an agent in the background and send the result back via Telegram."""
     try:
-        job = await run_agent(
+        execution = await run_agent(
             agent_name=agent_name,
             task=task,
-            project_name=project_name,
             cwd=cwd,
             system_prompt=system_prompt,
         )
-        if job.output:
-            await bot.send_message(job.output)
-        elif job.error:
-            await bot.send_message(f"Failed: {job.error}")
+        if execution.output:
+            await bot.send_message(execution.output)
+        elif execution.error:
+            await bot.send_message(f"Failed: {execution.error}")
         else:
-            await bot.send_message(f"Done (status: {job.status})")
+            await bot.send_message(f"Done (status: {execution.status})")
     except Exception:
         logger.exception("Background agent failed")
         await bot.send_message("Agent encountered an error.")

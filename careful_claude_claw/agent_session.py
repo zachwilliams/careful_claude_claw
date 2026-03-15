@@ -21,8 +21,8 @@ from claude_agent_sdk import (
     ResultMessage,
 )
 
-from .db import insert_job, register_active_agent, unregister_active_agent, update_job
-from .models import Job, JobStatus
+from .db import insert_execution, register_active_agent, unregister_active_agent, update_execution
+from .models import Execution, JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ IDLE_TIMEOUT_SECONDS = 600  # 10 minutes
 @dataclass
 class AgentSession:
     name: str
-    job_id: str
+    execution_id: str
     client: ClaudeSDKClient
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -123,11 +123,11 @@ async def kill_session(name: str) -> bool:
     except (TimeoutError, Exception):
         logger.debug("disconnect() failed/timed out for %s", name)
 
-    # Update job status
-    from .db import update_job_status
+    # Update execution status
+    from .db import update_execution_status
 
-    update_job_status(session.job_id, JobStatus.CANCELLED)
-    unregister_active_agent(session.job_id)
+    update_execution_status(session.execution_id, JobStatus.CANCELLED)
+    unregister_active_agent(session.execution_id)
     _cleanup_workspace(session)
     unregister_session(name)
     return True
@@ -187,10 +187,10 @@ async def run_interactive_agent(
     agent_name: str = "tg-task",
     cwd: str | None = None,
     system_prompt: str | None = None,
-    project_name: str | None = None,
+    job_name: str = "interactive",
     allowed_tools: list[str] | None = None,
     max_turns: int = 10,
-) -> Job:
+) -> Execution:
     """Spawn an interactive agent using ClaudeSDKClient.
 
     Creates a persistent client session that supports follow-up messages
@@ -204,15 +204,14 @@ async def run_interactive_agent(
     workspace = Path(cwd) if cwd else Path.cwd() / "workspace" / name
     workspace.mkdir(parents=True, exist_ok=True)
 
-    job = Job(
+    execution = Execution(
+        job_name=job_name,
         agent_name=agent_name,
-        task=task,
-        project_name=project_name,
         started_at=datetime.now(UTC),
         status=JobStatus.RUNNING,
     )
-    insert_job(job)
-    register_active_agent(job)
+    insert_execution(execution)
+    register_active_agent(execution)
 
     tools = allowed_tools or DEFAULT_ALLOWED_TOOLS
     opts = ClaudeAgentOptions(
@@ -226,7 +225,7 @@ async def run_interactive_agent(
     client = ClaudeSDKClient(options=opts)
     session = AgentSession(
         name=name,
-        job_id=job.id,
+        execution_id=execution.id,
         client=client,
         cwd=workspace,
         is_temp_workspace=is_temp,
@@ -247,7 +246,6 @@ async def run_interactive_agent(
                     if result_text:
                         await on_message(f"[{name}] {result_text}")
                     got_result = True
-                    # Don't break — keep iterating if the stream continues
                 elif isinstance(msg, AssistantMessage):
                     text = _extract_assistant_text(msg)
                     if text:
@@ -255,7 +253,6 @@ async def run_interactive_agent(
 
             # Iterator exhausted. If we got a result, wait for follow-up
             if got_result:
-                # Wait for follow-up or idle timeout
                 while True:
                     await asyncio.sleep(1)
                     idle = (datetime.now(UTC) - session.last_activity).total_seconds()
@@ -263,44 +260,37 @@ async def run_interactive_agent(
                         logger.info("Agent %s idle timeout after %ds", name, idle)
                         await on_message(f"[{name}] Session closed (idle timeout).")
                         break
-                    # If session was removed externally (killed), stop
                     if name not in AGENT_SESSIONS:
-                        return job
-                    # Check if a new query was sent (last_activity updated)
-                    # If so, break to re-enter receive_messages loop
+                        return execution
                     if idle < 1.5:
-                        # Activity just happened, re-enter message loop
                         break
                 else:
-                    # Idle timeout reached — exit outer loop
                     break
             else:
-                # Iterator ended without result — agent disconnected
                 break
 
-        job.status = JobStatus.SUCCESS
-        job.output = result_text or ""
-        job.ended_at = datetime.now(UTC)
-        update_job(job)
+        execution.status = JobStatus.SUCCESS
+        execution.output = result_text or ""
+        execution.ended_at = datetime.now(UTC)
+        update_execution(execution)
 
         if not result_text:
             await on_message(f"[{name}] Done.")
 
     except asyncio.CancelledError:
-        job.status = JobStatus.CANCELLED
-        job.ended_at = datetime.now(UTC)
-        update_job(job)
+        execution.status = JobStatus.CANCELLED
+        execution.ended_at = datetime.now(UTC)
+        update_execution(execution)
         await on_message(f"[{name}] Cancelled.")
     except (CLINotFoundError, CLIConnectionError, Exception) as exc:
         logger.exception("Interactive agent %s failed", name)
-        job.status = JobStatus.FAILED
-        job.error = str(exc)
-        job.ended_at = datetime.now(UTC)
-        update_job(job)
+        execution.status = JobStatus.FAILED
+        execution.error = str(exc)
+        execution.ended_at = datetime.now(UTC)
+        update_execution(execution)
         await on_message(f"[{name}] Failed: {exc}")
     finally:
-        unregister_active_agent(job.id)
-        # Only unregister session if it wasn't already killed
+        unregister_active_agent(execution.id)
         if name in AGENT_SESSIONS:
             try:
                 await asyncio.wait_for(client.disconnect(), timeout=5)
@@ -309,4 +299,4 @@ async def run_interactive_agent(
             _cleanup_workspace(session)
             unregister_session(name)
 
-    return job
+    return execution

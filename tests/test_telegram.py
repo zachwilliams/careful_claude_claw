@@ -14,7 +14,7 @@ from careful_claude_claw.agent_session import (
     AgentSession,
     register_session,
 )
-from careful_claude_claw.models import Job, JobStatus
+from careful_claude_claw.models import Execution, JobStatus
 from careful_claude_claw.telegram import (
     CommandRouter,
     TelegramBot,
@@ -153,18 +153,18 @@ async def test_status_no_agents(router, mock_bot):
 
 
 @pytest.mark.asyncio
-async def test_status_with_jobs(router, mock_bot):
-    job = Job(
+async def test_status_with_executions(router, mock_bot):
+    ex = Execution(
+        job_name="test-job",
         agent_name="test",
-        task="test task",
         status=JobStatus.SUCCESS,
         started_at=datetime.now(UTC),
     )
-    db_module.insert_job(job)
+    db_module.insert_execution(ex)
 
     await router.handle_message("/status")
     msg = mock_bot.send_message.call_args[0][0]
-    assert "Recent Jobs" in msg
+    assert "Recent Executions" in msg
     assert "test" in msg
 
 
@@ -172,27 +172,43 @@ async def test_status_with_jobs(router, mock_bot):
 async def test_jobs_empty(router, mock_bot):
     await router.handle_message("/jobs")
     msg = mock_bot.send_message.call_args[0][0]
-    assert "No jobs found" in msg
+    assert "No jobs" in msg
 
 
 @pytest.mark.asyncio
 async def test_jobs_with_data(router, mock_bot):
-    for i in range(3):
-        db_module.insert_job(
-            Job(agent_name=f"agent-{i}", task=f"task {i}", started_at=datetime.now(UTC))
-        )
+    from careful_claude_claw.models import Job
+
+    db_module.insert_job(Job(name="my-job", task="do stuff"))
 
     await router.handle_message("/jobs")
     msg = mock_bot.send_message.call_args[0][0]
-    assert "Recent Jobs" in msg
-    assert "agent-0" in msg
+    assert "Jobs" in msg
+    assert "my-job" in msg
 
 
 @pytest.mark.asyncio
-async def test_projects_empty(router, mock_bot):
-    await router.handle_message("/projects")
+async def test_runs_empty(router, mock_bot):
+    await router.handle_message("/runs")
     msg = mock_bot.send_message.call_args[0][0]
-    assert "No projects" in msg
+    assert "No executions" in msg
+
+
+@pytest.mark.asyncio
+async def test_runs_with_data(router, mock_bot):
+    for i in range(3):
+        db_module.insert_execution(
+            Execution(
+                job_name=f"job-{i}",
+                agent_name=f"agent-{i}",
+                started_at=datetime.now(UTC),
+            )
+        )
+
+    await router.handle_message("/runs")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "Recent Executions" in msg
+    assert "agent-0" in msg
 
 
 @pytest.mark.asyncio
@@ -203,13 +219,6 @@ async def test_skills(router, mock_bot, monkeypatch):
     await router.handle_message("/skills")
     msg = mock_bot.send_message.call_args[0][0]
     assert "No skills" in msg
-
-
-@pytest.mark.asyncio
-async def test_schedules_empty(router, mock_bot):
-    await router.handle_message("/schedules")
-    msg = mock_bot.send_message.call_args[0][0]
-    assert "No schedules" in msg
 
 
 @pytest.mark.asyncio
@@ -271,7 +280,7 @@ async def test_tasks_empty(router, mock_bot):
 @pytest.mark.asyncio
 async def test_tasks_with_sessions(router, mock_bot):
     client = MagicMock()
-    session = AgentSession(name="task-1", job_id="j1", client=client)
+    session = AgentSession(name="task-1", execution_id="e1", client=client)
     register_session(session)
 
     await router.handle_message("/tasks")
@@ -391,7 +400,7 @@ async def test_at_reply_no_message(router, mock_bot):
 @pytest.mark.asyncio
 async def test_status_with_sessions(router, mock_bot):
     client = MagicMock()
-    session = AgentSession(name="task-1", job_id="j1234567-rest", client=client)
+    session = AgentSession(name="task-1", execution_id="e1234567-rest", client=client)
     register_session(session)
 
     await router.handle_message("/status")
@@ -455,7 +464,7 @@ async def test_handle_file_with_target(router, mock_bot, tmp_path):
     client.query = AsyncMock()
     session = AgentSession(
         name="T1",
-        job_id="j1",
+        execution_id="e1",
         client=client,
         cwd=tmp_path,
         is_temp_workspace=False,
@@ -485,8 +494,8 @@ async def test_handle_file_with_target(router, mock_bot, tmp_path):
 async def test_handle_file_asks_which_agent(router, mock_bot):
     """Multiple active agents + no @name → asks user which agent."""
     client = MagicMock()
-    s1 = AgentSession(name="T1", job_id="j1", client=client)
-    s2 = AgentSession(name="T2", job_id="j2", client=client)
+    s1 = AgentSession(name="T1", execution_id="e1", client=client)
+    s2 = AgentSession(name="T2", execution_id="e2", client=client)
     register_session(s1)
     register_session(s2)
 
