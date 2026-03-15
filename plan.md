@@ -19,17 +19,17 @@ A security-first Python platform for managing Claude Code agents across messagin
 ```
 ┌──────────────────────────────────────────────────┐
 │                  Interfaces                      │
-│  ┌──────────┐  ┌───────────┐  ┌──────────────┐  │
-│  │ CLI      │  │ Telegram  │  │ Scheduler    │  │
-│  │ (click)  │  │ (polling) │  │ (APScheduler)│  │
-│  └────┬─────┘  └─────┬─────┘  └──────┬───────┘  │
+│  ┌──────────┐   ┌───────────┐  ┌──────────────┐  │
+│  │ CLI      │   │ Telegram  │  │ Scheduler    │  │
+│  │ (click)  │   │ (polling) │  │ (APScheduler)│  │
+│  └────┬─────┘   └─────┬─────┘  └──────┬───────┘  │
 │       └───────────────┼───────────────┘          │
 │                       ▼                          │
 │  ┌────────────────────────────────────────────┐  │
 │  │            Security Layer                  │  │
 │  │  security.yaml → allowed_tools             │  │
-│  │                 + system_prompt policies    │  │
-│  │                 + hooks (future)            │  │
+│  │                + system_prompt policies    │  │
+│  │                + hooks (future)            │  │
 │  └────────────────────┬───────────────────────┘  │
 │                       ▼                          │
 │  ┌────────────────────────────────────────────┐  │
