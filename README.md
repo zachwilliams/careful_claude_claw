@@ -37,15 +37,46 @@ Options:
 --task          Task for the agent to execute
 --agent-name    Name to identify this agent  (default: demo)
 --cwd           Working directory for the agent
+--skill         Run a named skill instead of a raw task
 --max-attempts  Maximum retry attempts on failure  (default: 2)
 --backoff       Seconds to wait between retries  (default: 5)
 ```
 
-View job history:
+Start the scheduler and Telegram listener:
 
 ```bash
-uv run claw jobs
-uv run claw jobs --limit 50
+uv run claw start              # scheduler + auto-detect Telegram
+uv run claw start --telegram   # force Telegram on
+uv run claw telegram           # standalone Telegram listener (dev)
+```
+
+Manage services (background):
+
+```bash
+bin/claw-services start
+bin/claw-services stop
+bin/claw-services restart
+bin/claw-services status
+bin/claw-services logs
+```
+
+View jobs and status:
+
+```bash
+uv run claw jobs list
+uv run claw jobs add myjob --task "..." --cron "0 9 * * *"
+uv run claw jobs runs
+uv run claw status
+uv run claw skills
+```
+
+Dev reset (wipe database and Telegram chat history):
+
+```bash
+uv run claw reset              # wipe DB + Telegram messages (with confirmation)
+uv run claw reset -y           # skip confirmation
+uv run claw reset --db-only    # only wipe the database
+uv run claw reset --telegram-only  # only clear Telegram messages
 ```
 
 ## Running Tests
