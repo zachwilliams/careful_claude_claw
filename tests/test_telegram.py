@@ -395,7 +395,7 @@ async def test_status_with_sessions(router, mock_bot):
 
     await router.handle_message("/status")
     msg = mock_bot.send_message.call_args[0][0]
-    assert "Interactive Sessions" in msg
+    assert "Active Agents" in msg
     assert "task-1" in msg
 
 

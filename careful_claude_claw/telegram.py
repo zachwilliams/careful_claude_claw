@@ -22,7 +22,7 @@ from .agent_session import (
     run_interactive_agent,
     send_to_agent,
 )
-from .db import init_db, list_active_agents, list_jobs, list_projects, list_schedules
+from .db import init_db, list_jobs, list_projects, list_schedules
 from .skills import discover_skills, get_skill
 
 logger = logging.getLogger(__name__)
@@ -189,22 +189,14 @@ class CommandRouter:
         await self.bot.send_message("\n".join(lines))
 
     async def _handle_status(self) -> None:
-        agents = list_active_agents()
         sessions = list_sessions()
         jobs = list_jobs(limit=5)
 
         lines = []
         if sessions:
-            lines.append(f"*Interactive Sessions ({len(sessions)})*")
+            lines.append(f"*Active Agents ({len(sessions)})*")
             for s in sessions:
                 lines.append(f"  `{s.name}` (job: {s.job_id[:8]})")
-            lines.append("")
-
-        if agents:
-            lines.append(f"*Active Agents ({len(agents)})*")
-            for a in agents:
-                task = (a["task"] or "")[:50]
-                lines.append(f"  {a['agent_name']}: {task}")
         else:
             lines.append("No active agents.")
 
