@@ -236,6 +236,23 @@ async def test_run_skill_not_found(router, mock_bot):
 
 
 @pytest.mark.asyncio
+async def test_unrecognized_slash_command_errors(router, mock_bot):
+    await router.handle_message("/stauts")
+    msg = mock_bot.send_message.call_args[0][0]
+    assert "not a valid command" in msg
+    assert "/help" in msg
+
+
+@pytest.mark.asyncio
+async def test_unrecognized_slash_command_does_not_spawn_agent(router, mock_bot):
+    with patch(
+        "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
+    ) as mock_run:
+        await router.handle_message("/blah something")
+        mock_run.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_free_text_spawns_agent(router, mock_bot):
     with patch(
         "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock

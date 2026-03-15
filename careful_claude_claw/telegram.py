@@ -254,6 +254,10 @@ class CommandRouter:
             await self._handle_reply(text)
         elif cmd == "/new":
             await self._handle_new()
+        elif cmd.startswith("/"):
+            await self.bot.send_message(
+                "That's not a valid command. Type /help to see all commands."
+            )
         else:
             # Free text -> spawn agent
             await self._spawn_agent(text)
