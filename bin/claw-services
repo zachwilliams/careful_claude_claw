@@ -6,6 +6,7 @@
 #   claw-services start   Start all services
 #   claw-services stop    Stop all services
 #   claw-services status  Show service status
+#   claw-services restart Restart all services
 #   claw-services logs    Tail all logs
 #
 
@@ -144,6 +145,11 @@ cmd_status() {
     echo
 }
 
+cmd_restart() {
+    cmd_stop
+    cmd_start
+}
+
 cmd_logs() {
     local files=()
     [[ -f "$LOG_DIR/claw.log" ]] && files+=("$LOG_DIR/claw.log")
@@ -160,12 +166,13 @@ cmd_logs() {
 # --- Main ---
 
 case "${1:-}" in
-    start)  cmd_start ;;
-    stop)   cmd_stop ;;
-    status) cmd_status ;;
-    logs)   cmd_logs ;;
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    status)  cmd_status ;;
+    logs)    cmd_logs ;;
     *)
-        echo "Usage: claw-services {start|stop|status|logs}"
+        echo "Usage: claw-services {start|stop|restart|status|logs}"
         exit 1
         ;;
 esac
