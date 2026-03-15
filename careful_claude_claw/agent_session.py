@@ -47,15 +47,15 @@ AGENT_SESSIONS: dict[str, AgentSession] = {}
 _name_counter: int = 0
 
 
-def generate_name(prefix: str = "task") -> str:
-    """Generate a unique friendly name like task-1, task-2, etc."""
+def generate_name(prefix: str = "T") -> str:
+    """Generate a unique short name like T1, T2, S3, etc."""
     global _name_counter
     _name_counter += 1
-    name = f"{prefix}-{_name_counter}"
+    name = f"{prefix}{_name_counter}"
     # Avoid collisions with existing sessions
     while name in AGENT_SESSIONS:
         _name_counter += 1
-        name = f"{prefix}-{_name_counter}"
+        name = f"{prefix}{_name_counter}"
     return name
 
 
