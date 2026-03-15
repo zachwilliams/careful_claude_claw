@@ -45,8 +45,6 @@ uv run claw status
 
 # Dev reset: wipe DB + Telegram chat history
 uv run claw reset
-uv run claw reset --db-only
-uv run claw reset --telegram-only
 
 # Run tests
 uv run pytest

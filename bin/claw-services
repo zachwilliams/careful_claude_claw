@@ -6,7 +6,8 @@
 #   claw-services start   Start all services
 #   claw-services stop    Stop all services
 #   claw-services status  Show service status
-#   claw-services restart Restart all services
+#   claw-services restart  Restart all services
+#   claw-services dev-reset  Stop, wipe DB + Telegram messages, clear logs, restart
 #   claw-services logs    Tail all logs
 #
 
@@ -147,6 +148,40 @@ cmd_status() {
 
 cmd_restart() {
     cmd_stop
+    # Clear logs on restart
+    if [[ -d "$LOG_DIR" ]]; then
+        rm -f "$LOG_DIR"/*.log
+        echo "  [ok] logs cleared"
+        echo
+    fi
+    cmd_start
+}
+
+cmd_dev_reset() {
+    echo "=== CarefulClaw Dev Reset ==="
+    echo "This will: stop services, wipe the DB, delete Telegram messages, clear logs, and restart."
+    echo
+    read -rp "Are you sure? [y/N] " confirm
+    if [[ "$confirm" != [yY] ]]; then
+        echo "Aborted."
+        return
+    fi
+    echo
+
+    cmd_stop
+
+    # Wipe DB + Telegram messages
+    cd "$CLAW_DIR"
+    uv run claw reset -y
+    echo
+
+    # Clear logs
+    if [[ -d "$LOG_DIR" ]]; then
+        rm -f "$LOG_DIR"/*.log
+        echo "  [ok] logs cleared"
+        echo
+    fi
+
     cmd_start
 }
 
@@ -166,13 +201,14 @@ cmd_logs() {
 # --- Main ---
 
 case "${1:-}" in
-    start)   cmd_start ;;
-    stop)    cmd_stop ;;
-    restart) cmd_restart ;;
-    status)  cmd_status ;;
-    logs)    cmd_logs ;;
+    start)     cmd_start ;;
+    stop)      cmd_stop ;;
+    restart)   cmd_restart ;;
+    dev-reset) cmd_dev_reset ;;
+    status)    cmd_status ;;
+    logs)      cmd_logs ;;
     *)
-        echo "Usage: claw-services {start|stop|restart|status|logs}"
+        echo "Usage: claw-services {start|stop|restart|dev-reset|status|logs}"
         exit 1
         ;;
 esac

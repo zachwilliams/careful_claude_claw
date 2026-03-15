@@ -409,10 +409,8 @@ async def _clear_telegram(token: str, chat_id: int) -> int:
 
 @cli.command()
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
-@click.option("--db-only", is_flag=True, help="Only reset the database.")
-@click.option("--telegram-only", is_flag=True, help="Only clear Telegram messages.")
-def reset(yes: bool, db_only: bool, telegram_only: bool) -> None:
-    """[Dev] Wipe all data: clear SQLite DB and Telegram chat history."""
+def reset(yes: bool) -> None:
+    """[Dev] Wipe all data: kill agents, clear SQLite DB, and delete Telegram messages."""
     if not yes:
         click.confirm(
             "This will DELETE all database data and Telegram messages. Continue?",
@@ -420,26 +418,26 @@ def reset(yes: bool, db_only: bool, telegram_only: bool) -> None:
         )
 
     # Kill active agent sessions
-    if not telegram_only:
-        from .agent_session import kill_all_sessions
+    from .agent_session import kill_all_sessions
 
-        killed = asyncio.run(kill_all_sessions())
-        if killed:
-            console.print(f"[yellow]Killed {killed} active agent(s).[/yellow]")
+    killed = asyncio.run(kill_all_sessions())
+    if killed:
+        console.print(f"[yellow]Killed {killed} active agent(s).[/yellow]")
 
-        init_db()
-        console.print("[green]Database reset.[/green]")
+    # Wipe database
+    init_db()
+    console.print("[green]Database reset.[/green]")
 
-    if not db_only:
-        from .telegram import load_telegram_config
+    # Clear Telegram messages
+    from .telegram import load_telegram_config
 
-        config = load_telegram_config()
-        if not config:
-            console.print("[yellow]Telegram not configured, skipping message cleanup.[/yellow]")
-        else:
-            token, chat_id = config
-            deleted = asyncio.run(_clear_telegram(token, chat_id))
-            console.print(f"[green]Deleted {deleted} Telegram message(s).[/green]")
+    config = load_telegram_config()
+    if not config:
+        console.print("[yellow]Telegram not configured, skipping message cleanup.[/yellow]")
+    else:
+        token, chat_id = config
+        deleted = asyncio.run(_clear_telegram(token, chat_id))
+        console.print(f"[green]Deleted {deleted} Telegram message(s).[/green]")
 
     console.print("[bold green]Reset complete.[/bold green]")
 

@@ -75,8 +75,6 @@ Dev reset (wipe database and Telegram chat history):
 ```bash
 uv run claw reset              # wipe DB + Telegram messages (with confirmation)
 uv run claw reset -y           # skip confirmation
-uv run claw reset --db-only    # only wipe the database
-uv run claw reset --telegram-only  # only clear Telegram messages
 ```
 
 ## Running Tests
