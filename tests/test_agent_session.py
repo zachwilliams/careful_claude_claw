@@ -58,20 +58,20 @@ def _make_session(name: str = "task-1") -> AgentSession:
 def test_generate_name_increments():
     n1 = generate_name()
     n2 = generate_name()
-    assert n1 == "task-1"
-    assert n2 == "task-2"
+    assert n1 == "T1"
+    assert n2 == "T2"
 
 
 def test_generate_name_custom_prefix():
-    n = generate_name("skill-deploy")
-    assert n == "skill-deploy-1"
+    n = generate_name("S")
+    assert n == "S1"
 
 
 def test_generate_name_skips_collision():
-    session = _make_session("task-1")
+    session = _make_session("T1")
     register_session(session)
     n = generate_name()
-    assert n == "task-2"
+    assert n == "T2"
 
 
 # --- register / unregister / get / list ---

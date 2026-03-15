@@ -364,7 +364,7 @@ class CommandRouter:
             if proj:
                 cwd = proj["path"]
 
-        name = generate_name(f"skill-{skill_name}")
+        name = generate_name("S")
         await self.bot.send_message(f"[{name}] Starting skill `{skill_name}`...")
         bot = self.bot
 
@@ -387,7 +387,7 @@ class CommandRouter:
 
     async def _spawn_agent(self, text: str) -> None:
         """Spawn a background agent for free-text tasks."""
-        name = generate_name("task")
+        name = generate_name("T")
         await self.bot.send_message(f"[{name}] Starting...")
         bot = self.bot
 
