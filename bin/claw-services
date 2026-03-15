@@ -15,7 +15,7 @@ CLAW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PID_DIR="$CLAW_DIR/.pids"
 LOG_DIR="$CLAW_DIR/.logs"
 
-TG_CLI="/Users/zach/projects/mcp-telegram/.venv/bin/tg"
+TG_CLI="${MCP_TELEGRAM_CLI:-tg}"
 TG_PID_FILE="$HOME/.mcp-telegram/daemon.pid"
 
 mkdir -p "$PID_DIR" "$LOG_DIR"

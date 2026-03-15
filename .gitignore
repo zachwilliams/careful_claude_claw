@@ -20,3 +20,6 @@ htmlcov/
 # Runtime
 .pids/
 .logs/
+
+# MCP config (may contain credentials)
+.mcp.json
