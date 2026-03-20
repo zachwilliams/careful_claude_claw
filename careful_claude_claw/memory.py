@@ -10,6 +10,7 @@ from datetime import datetime
 from .db import (
     cleanup_expired_memories,
     insert_memory,
+    record_memory_access,
     search_memories_fts,
 )
 from .db import (
@@ -27,7 +28,7 @@ from .db import (
 from .db import (
     update_memory as db_update_memory,
 )
-from .models import Memory, MemorySource, MemoryType
+from .models import MEMORY_DECAY_RATES, Memory, MemorySource, MemoryType, score_memory
 
 
 def _row_to_memory(row: dict) -> Memory:
@@ -43,7 +44,12 @@ def _row_to_memory(row: dict) -> Memory:
         tags=tags,
         category=row.get("category"),
         metadata=metadata,
-        embedding=row.get("embedding"),
+        importance=row.get("importance", 0.5),
+        decay_rate=row.get("decay_rate", 0.0),
+        access_count=row.get("access_count", 0),
+        last_accessed_at=(
+            datetime.fromisoformat(row["last_accessed_at"]) if row.get("last_accessed_at") else None
+        ),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
         expires_at=datetime.fromisoformat(row["expires_at"]) if row.get("expires_at") else None,
@@ -52,12 +58,15 @@ def _row_to_memory(row: dict) -> Memory:
 
 
 def add_memory(memory: Memory) -> Memory:
-    """Insert a new memory and return it."""
+    """Insert a new memory and return it with its ID set."""
+    # Set default decay rate from type if not explicitly set
+    if memory.decay_rate == 0.0 and memory.memory_type in MEMORY_DECAY_RATES:
+        memory.decay_rate = MEMORY_DECAY_RATES[memory.memory_type]
     insert_memory(memory)
     return memory
 
 
-def get_memory(memory_id: str) -> Memory | None:
+def get_memory(memory_id: int) -> Memory | None:
     """Get a single active memory by ID."""
     row = db_get_memory(memory_id)
     return _row_to_memory(row) if row else None
@@ -70,7 +79,7 @@ def update_memory(memory: Memory) -> Memory:
     return memory
 
 
-def delete_memory(memory_id: str) -> None:
+def delete_memory(memory_id: int) -> None:
     """Soft-delete a memory."""
     db_delete_memory(memory_id)
 
@@ -109,10 +118,9 @@ def get_relevant_memories(
     memory_types: list[MemoryType] | None = None,
     limit: int = 10,
 ) -> list[Memory]:
-    """Retrieve memories relevant to a given context string using FTS5.
+    """Retrieve memories relevant to a given context string using FTS5 + scoring.
 
-    Always includes preferences. If memory_types is specified,
-    also searches those types.
+    Always includes preferences. Uses composite scoring for ranking.
     """
     results: list[Memory] = []
 
@@ -121,7 +129,7 @@ def get_relevant_memories(
     results.extend(preferences)
 
     # FTS5 search for contextually relevant memories
-    fts_rows = search_memories_fts(context, limit=limit)
+    fts_rows = search_memories_fts(context, limit=limit * 2)
     seen_ids = {m.id for m in results}
     for row in fts_rows:
         mem = _row_to_memory(row)
@@ -129,6 +137,14 @@ def get_relevant_memories(
             if memory_types is None or mem.memory_type in memory_types:
                 results.append(mem)
                 seen_ids.add(mem.id)
+
+    # Score and sort all results
+    results.sort(key=lambda m: score_memory(m), reverse=True)
+
+    # Record access for returned memories
+    for mem in results[:limit]:
+        if mem.id is not None:
+            record_memory_access(mem.id)
 
     return results[:limit]
 

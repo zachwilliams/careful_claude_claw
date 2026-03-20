@@ -1,0 +1,288 @@
+"""Persistent Orchestrator — a long-lived Claude agent session with memory MCP tools.
+
+Replaces the stateless Orchestrator for interactive use cases.
+Messages from all interfaces feed into a single queue, and the orchestrator
+processes them one at a time through its persistent ClaudeSDKClient session.
+"""
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ResultMessage,
+)
+
+from .db import (
+    get_orchestrator_state,
+    increment_message_count,
+    init_db,
+    upsert_orchestrator_state,
+)
+from .memory import list_memories
+from .memory_tools import create_orchestrator_mcp_server, set_message_callback
+from .models import MemoryType, OrchestratorState, score_memory
+
+logger = logging.getLogger(__name__)
+
+MessageCallback = Callable[[str], Awaitable[None]]
+
+MAX_BRIEFING_TOKENS = 2000  # approximate char limit for core briefing
+
+SYSTEM_PROMPT = """\
+You are Claw, a persistent AI assistant. You maintain memory across conversations
+and can spawn sub-agents for complex coding tasks.
+
+## Available MCP Tools
+
+### Memory tools
+- `memory_search` — Search memories by query, type, category
+- `memory_write` — Store a new memory (preference, decision, observation, procedure)
+- `memory_update` — Update existing memory content
+- `memory_delete` — Soft-delete a memory
+- `memory_list` — List memories with optional type filter
+
+### Sub-agent tools
+- `spawn_agent` — Spawn a sub-agent for coding/file tasks
+- `list_agents` — Show running sub-agents
+- `kill_agent` — Kill a sub-agent by name
+- `send_to_agent` — Send a message to a running sub-agent
+
+### System tools
+- `list_jobs` — Show scheduled jobs
+- `list_skills` — Show available skills
+
+## Memory Guidelines
+- Write memories proactively when you learn something about the user
+- Use `preference` for user preferences (permanent, high weight)
+- Use `decision` for key decisions (slow decay)
+- Use `observation` for facts about user/project (decays over weeks)
+- Use `procedure` for workflows and processes (permanent)
+- Set importance 0.0-1.0 based on how useful the memory will be later
+- Before writing, search to avoid duplicates — update existing memories instead
+- Use categories and tags for organization
+
+## Interaction Style
+- Be concise and direct
+- For coding tasks, spawn a sub-agent rather than doing it inline
+- For questions about the user or past context, search memory first
+- When uncertain, ask rather than assume
+
+## Core Briefing
+{core_briefing}
+"""
+
+CONSOLIDATION_PROMPT = """\
+Review your recent interactions and consolidate your memories:
+
+1. Search for redundant or overlapping memories and merge them
+2. Update any memories that are now outdated based on recent interactions
+3. Write a fresh core briefing as a `procedure` memory with category `core_briefing`
+   - Include key user preferences, active projects, and important context
+   - Keep it under 2000 characters
+
+After consolidation, respond with a brief summary of what you changed.
+"""
+
+
+@dataclass
+class PendingMessage:
+    text: str
+    source: str  # "telegram", "cli", "scheduler"
+    callback: MessageCallback
+
+
+class PersistentOrchestrator:
+    """A persistent ClaudeSDKClient session with in-process MCP tools for memory and sub-agents."""
+
+    def __init__(self) -> None:
+        self._client: ClaudeSDKClient | None = None
+        self._queue: asyncio.Queue[PendingMessage] = asyncio.Queue()
+        self._state: OrchestratorState = OrchestratorState()
+        self._pump_task: asyncio.Task | None = None
+        self._mcp_server = create_orchestrator_mcp_server()
+
+    @property
+    def is_awake(self) -> bool:
+        return self._state.is_awake
+
+    async def wake(self) -> None:
+        """Connect (or resume) the orchestrator session."""
+        if self._state.is_awake and self._client:
+            return
+
+        init_db()
+        self._state = get_orchestrator_state()
+
+        # Build core briefing from scored memories
+        self._state.core_briefing = self._build_core_briefing()
+
+        # Create client with MCP tools
+        briefing = self._state.core_briefing or "No memories yet."
+        system_prompt = SYSTEM_PROMPT.format(core_briefing=briefing)
+
+        opts = ClaudeAgentOptions(
+            allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "mcp__*"],
+            max_turns=25,
+            setting_sources=["user"],
+            system_prompt=system_prompt,
+            mcp_servers=[self._mcp_server],
+        )
+
+        # Try to resume existing session
+        if self._state.session_id:
+            opts.resume = self._state.session_id
+
+        self._client = ClaudeSDKClient(options=opts)
+
+        try:
+            await self._client.connect()
+        except Exception:
+            # Resume failed — start fresh
+            logger.warning("Session resume failed, starting fresh")
+            self._state.session_id = None
+            opts.resume = None
+            self._client = ClaudeSDKClient(options=opts)
+            await self._client.connect()
+
+        self._state.is_awake = True
+        self._state.last_wake_at = datetime.now(UTC)
+        upsert_orchestrator_state(self._state)
+
+        # Start message pump
+        self._pump_task = asyncio.create_task(self._message_pump())
+        logger.info("Orchestrator awake (session=%s)", self._state.session_id or "new")
+
+    async def sleep(self) -> None:
+        """Run consolidation, then disconnect."""
+        if not self._state.is_awake or not self._client:
+            return
+
+        # Cancel pump
+        if self._pump_task and not self._pump_task.done():
+            self._pump_task.cancel()
+            try:
+                await self._pump_task
+            except asyncio.CancelledError:
+                pass
+
+        # Send consolidation prompt
+        try:
+            await self._client.query(CONSOLIDATION_PROMPT)
+            async for msg in self._client.receive_messages():
+                if isinstance(msg, ResultMessage):
+                    logger.info("Consolidation result: %s", (msg.result or "")[:200])
+                    break
+        except Exception:
+            logger.exception("Consolidation failed")
+
+        # Disconnect
+        try:
+            await asyncio.wait_for(self._client.disconnect(), timeout=10)
+        except (TimeoutError, Exception):
+            logger.warning("Disconnect timed out")
+
+        self._client = None
+        self._state.is_awake = False
+        self._state.last_sleep_at = datetime.now(UTC)
+        upsert_orchestrator_state(self._state)
+        logger.info("Orchestrator asleep")
+
+    async def submit(self, text: str, source: str, callback: MessageCallback) -> None:
+        """Entry point for all interfaces. Auto-wakes if asleep."""
+        if not self._state.is_awake:
+            await self.wake()
+        await self._queue.put(PendingMessage(text=text, source=source, callback=callback))
+
+    async def _message_pump(self) -> None:
+        """Async loop: dequeue messages, query the agent, send responses via callback."""
+        while True:
+            try:
+                pending = await self._queue.get()
+                set_message_callback(pending.callback)
+
+                try:
+                    await self._client.query(pending.text)
+
+                    async for msg in self._client.receive_messages():
+                        if isinstance(msg, ResultMessage):
+                            if msg.result:
+                                await pending.callback(msg.result)
+                            # Capture session_id for resume
+                            if hasattr(msg, "session_id") and msg.session_id:
+                                self._state.session_id = msg.session_id
+                                upsert_orchestrator_state(self._state)
+                        elif isinstance(msg, AssistantMessage):
+                            text = _extract_assistant_text(msg)
+                            if text:
+                                await pending.callback(text)
+
+                    increment_message_count()
+                    self._state.total_messages_handled += 1
+
+                except Exception:
+                    logger.exception("Error processing message")
+                    try:
+                        await pending.callback("Sorry, I encountered an internal error.")
+                    except Exception:
+                        pass
+                finally:
+                    set_message_callback(None)
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Pump error")
+
+    def _build_core_briefing(self) -> str:
+        """Build core briefing from scored top memories."""
+        # Check for explicit core_briefing procedure
+        briefings = list_memories(memory_type=MemoryType.PROCEDURE)
+        for mem in briefings:
+            if mem.category == "core_briefing":
+                return mem.content[:MAX_BRIEFING_TOKENS]
+
+        # Fallback: assemble from top-scored memories
+        all_mems = list_memories(limit=100)
+        if not all_mems:
+            return ""
+
+        scored = [(m, score_memory(m)) for m in all_mems]
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        lines = []
+        total = 0
+        for mem, sc in scored:
+            line = f"- [{mem.memory_type}] {mem.content}"
+            if total + len(line) > MAX_BRIEFING_TOKENS:
+                break
+            lines.append(line)
+            total += len(line) + 1
+
+        return "\n".join(lines)
+
+
+def _extract_assistant_text(msg: AssistantMessage) -> str | None:
+    """Extract text content from an AssistantMessage's content blocks."""
+    if not hasattr(msg, "content"):
+        return None
+    content = msg.content
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif hasattr(block, "type") and block.type == "text":
+                parts.append(getattr(block, "text", ""))
+        text = "\n".join(parts).strip()
+        return text or None
+    return None

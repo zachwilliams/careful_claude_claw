@@ -1,4 +1,4 @@
-"""Tests for the memory layer (CRUD, FTS5, tags, expiration)."""
+"""Tests for the memory layer (CRUD, FTS5, tags, expiration, scoring)."""
 
 from datetime import datetime, timedelta
 
@@ -30,23 +30,24 @@ def isolated_db(tmp_path, monkeypatch):
 
 def test_add_and_get_memory():
     mem = Memory(
-        memory_type=MemoryType.FACT,
+        memory_type=MemoryType.OBSERVATION,
         content="User prefers Python 3.11",
         source=MemorySource.USER,
     )
     result = add_memory(mem)
-    assert result.id == mem.id
+    assert result.id is not None
+    assert isinstance(result.id, int)
 
     fetched = get_memory(mem.id)
     assert fetched is not None
     assert fetched.content == "User prefers Python 3.11"
-    assert fetched.memory_type == MemoryType.FACT
+    assert fetched.memory_type == MemoryType.OBSERVATION
     assert fetched.source == MemorySource.USER
     assert fetched.is_active is True
 
 
 def test_get_nonexistent_memory():
-    assert get_memory("nonexistent-id") is None
+    assert get_memory(99999) is None
 
 
 def test_update_memory():
@@ -66,7 +67,7 @@ def test_update_memory():
 
 def test_delete_memory_soft():
     mem = Memory(
-        memory_type=MemoryType.FACT,
+        memory_type=MemoryType.OBSERVATION,
         content="Temporary fact",
     )
     add_memory(mem)
@@ -78,16 +79,16 @@ def test_delete_memory_soft():
 
 
 def test_list_memories():
-    add_memory(Memory(memory_type=MemoryType.FACT, content="Fact 1"))
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Fact 1"))
     add_memory(Memory(memory_type=MemoryType.PREFERENCE, content="Pref 1"))
-    add_memory(Memory(memory_type=MemoryType.FACT, content="Fact 2"))
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Fact 2"))
 
     all_mems = list_memories()
     assert len(all_mems) == 3
 
-    facts = list_memories(memory_type=MemoryType.FACT)
-    assert len(facts) == 2
-    assert all(m.memory_type == MemoryType.FACT for m in facts)
+    observations = list_memories(memory_type=MemoryType.OBSERVATION)
+    assert len(observations) == 2
+    assert all(m.memory_type == MemoryType.OBSERVATION for m in observations)
 
     prefs = list_memories(memory_type=MemoryType.PREFERENCE)
     assert len(prefs) == 1
@@ -95,7 +96,7 @@ def test_list_memories():
 
 def test_list_memories_limit():
     for i in range(10):
-        add_memory(Memory(memory_type=MemoryType.FACT, content=f"Fact {i}"))
+        add_memory(Memory(memory_type=MemoryType.OBSERVATION, content=f"Fact {i}"))
 
     limited = list_memories(limit=5)
     assert len(limited) == 5
@@ -109,8 +110,10 @@ def test_list_memories_empty():
 
 
 def test_search_memories_fts():
-    add_memory(Memory(memory_type=MemoryType.FACT, content="User works with PostgreSQL databases"))
-    add_memory(Memory(memory_type=MemoryType.FACT, content="User enjoys hiking on weekends"))
+    add_memory(
+        Memory(memory_type=MemoryType.OBSERVATION, content="User works with PostgreSQL databases")
+    )
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="User enjoys hiking on weekends"))
     add_memory(
         Memory(
             memory_type=MemoryType.PREFERENCE,
@@ -125,13 +128,13 @@ def test_search_memories_fts():
 
 
 def test_search_memories_no_results():
-    add_memory(Memory(memory_type=MemoryType.FACT, content="User likes Python"))
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="User likes Python"))
     results = search_memories(query="javascript")
     assert len(results) == 0
 
 
 def test_search_memories_with_type_filter():
-    add_memory(Memory(memory_type=MemoryType.FACT, content="Uses vim editor"))
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Uses vim editor"))
     add_memory(Memory(memory_type=MemoryType.PREFERENCE, content="Prefers vim keybindings"))
 
     results = search_memories(query="vim", memory_type=MemoryType.PREFERENCE)
@@ -166,14 +169,14 @@ def test_search_memories_with_category():
 def test_search_memories_with_tags():
     add_memory(
         Memory(
-            memory_type=MemoryType.FACT,
+            memory_type=MemoryType.OBSERVATION,
             content="Knows Python and Rust",
             tags=["python", "rust", "languages"],
         )
     )
     add_memory(
         Memory(
-            memory_type=MemoryType.FACT,
+            memory_type=MemoryType.OBSERVATION,
             content="Knows TypeScript",
             tags=["typescript", "languages"],
         )
@@ -190,14 +193,14 @@ def test_search_memories_with_tags():
 def test_search_memories_multiple_tags():
     add_memory(
         Memory(
-            memory_type=MemoryType.FACT,
+            memory_type=MemoryType.OBSERVATION,
             content="Python web dev",
             tags=["python", "web"],
         )
     )
     add_memory(
         Memory(
-            memory_type=MemoryType.FACT,
+            memory_type=MemoryType.OBSERVATION,
             content="Python data science",
             tags=["python", "data"],
         )
@@ -213,11 +216,11 @@ def test_search_memories_multiple_tags():
 
 def test_cleanup_expired_memories():
     # Active, not expired
-    add_memory(Memory(memory_type=MemoryType.FACT, content="Still valid"))
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Still valid"))
 
     # Expired
     expired_mem = Memory(
-        memory_type=MemoryType.TASK_CONTEXT,
+        memory_type=MemoryType.OBSERVATION,
         content="Old task context",
         expires_at=datetime.now() - timedelta(hours=1),
     )
@@ -225,7 +228,7 @@ def test_cleanup_expired_memories():
 
     # Future expiration
     future_mem = Memory(
-        memory_type=MemoryType.TASK_CONTEXT,
+        memory_type=MemoryType.OBSERVATION,
         content="Future task context",
         expires_at=datetime.now() + timedelta(days=1),
     )
@@ -247,7 +250,7 @@ def test_cleanup_expired_memories():
 
 def test_get_relevant_memories_includes_preferences():
     add_memory(Memory(memory_type=MemoryType.PREFERENCE, content="Prefers concise code"))
-    add_memory(Memory(memory_type=MemoryType.FACT, content="Works on web projects"))
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Works on web projects"))
 
     results = get_relevant_memories("anything")
     # Should always include preferences
@@ -258,15 +261,38 @@ def test_get_relevant_memories_includes_preferences():
 def test_get_relevant_memories_fts_match():
     add_memory(
         Memory(
-            memory_type=MemoryType.FACT,
+            memory_type=MemoryType.OBSERVATION,
             content="The project uses FastAPI for the backend",
         )
     )
-    add_memory(Memory(memory_type=MemoryType.FACT, content="User has a cat named Whiskers"))
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="User has a cat named Whiskers"))
 
     results = get_relevant_memories("FastAPI backend")
     contents = [m.content for m in results]
     assert any("FastAPI" in c for c in contents)
+
+
+def test_get_relevant_memories_scored_ranking():
+    """Higher importance memories should rank higher."""
+    add_memory(
+        Memory(
+            memory_type=MemoryType.OBSERVATION,
+            content="Low importance Python fact",
+            importance=0.1,
+        )
+    )
+    add_memory(
+        Memory(
+            memory_type=MemoryType.OBSERVATION,
+            content="High importance Python decision",
+            importance=0.9,
+        )
+    )
+
+    results = get_relevant_memories("Python")
+    if len(results) >= 2:
+        # Higher importance should come first
+        assert results[0].importance >= results[1].importance
 
 
 # --- Memory with metadata ---
@@ -274,7 +300,7 @@ def test_get_relevant_memories_fts_match():
 
 def test_memory_with_metadata():
     mem = Memory(
-        memory_type=MemoryType.FACT,
+        memory_type=MemoryType.OBSERVATION,
         content="Has metadata",
         metadata={"confidence": 0.9, "source_url": "https://example.com"},
     )
@@ -283,3 +309,16 @@ def test_memory_with_metadata():
     fetched = get_memory(mem.id)
     assert fetched.metadata is not None
     assert fetched.metadata["confidence"] == 0.9
+
+
+# --- Decay rate defaults ---
+
+
+def test_add_memory_sets_decay_rate():
+    mem = Memory(memory_type=MemoryType.OBSERVATION, content="test")
+    add_memory(mem)
+    assert mem.decay_rate == 0.3  # OBSERVATION default
+
+    pref = Memory(memory_type=MemoryType.PREFERENCE, content="test pref")
+    add_memory(pref)
+    assert pref.decay_rate == 0.0  # PREFERENCE is permanent

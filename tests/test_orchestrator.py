@@ -1,14 +1,12 @@
 """Tests for the orchestrator — routing, context assembly, memory operations."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 import careful_claude_claw.db as db_module
 from careful_claude_claw.memory import add_memory
 from careful_claude_claw.models import (
-    Execution,
-    JobStatus,
     Memory,
     MemorySource,
     MemoryType,
@@ -82,16 +80,16 @@ class TestRetrieveContext:
         assert "concise code" in context
         assert "Memory Context" in context
 
-    def test_with_relevant_facts(self, orchestrator):
+    def test_with_relevant_observations(self, orchestrator):
         add_memory(
             Memory(
-                memory_type=MemoryType.FACT,
+                memory_type=MemoryType.OBSERVATION,
                 content="Project uses FastAPI for the API layer",
             )
         )
         add_memory(
             Memory(
-                memory_type=MemoryType.FACT,
+                memory_type=MemoryType.OBSERVATION,
                 content="User has a pet hamster",
             )
         )
@@ -126,7 +124,7 @@ class TestBuildSystemPrompt:
 
 class TestHandleMemoryAdd:
     @pytest.mark.asyncio
-    async def test_add_fact(self, orchestrator):
+    async def test_add_observation(self, orchestrator):
         response = await orchestrator.handle_memory_add("remember that the API key is in .env")
         assert "Remembered" in response
         assert "API key" in response
@@ -135,7 +133,7 @@ class TestHandleMemoryAdd:
 
         mems = list_memories()
         assert len(mems) == 1
-        assert mems[0].memory_type == MemoryType.FACT
+        assert mems[0].memory_type == MemoryType.OBSERVATION
         assert mems[0].source == MemorySource.USER
 
     @pytest.mark.asyncio
@@ -166,7 +164,7 @@ class TestHandleMemoryQuery:
     async def test_query_with_results(self, orchestrator):
         add_memory(
             Memory(
-                memory_type=MemoryType.FACT,
+                memory_type=MemoryType.OBSERVATION,
                 content="Project uses PostgreSQL database",
             )
         )
@@ -181,7 +179,7 @@ class TestHandleMemoryQuery:
 
     @pytest.mark.asyncio
     async def test_query_list_all(self, orchestrator):
-        add_memory(Memory(memory_type=MemoryType.FACT, content="Fact 1"))
+        add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Fact 1"))
         add_memory(Memory(memory_type=MemoryType.PREFERENCE, content="Pref 1"))
         response = await orchestrator.handle_memory_query("what are my preferences")
         assert "2 memory" in response
@@ -211,7 +209,7 @@ class TestHandleRequest:
 
     @pytest.mark.asyncio
     async def test_memory_query(self, orchestrator):
-        add_memory(Memory(memory_type=MemoryType.FACT, content="Uses vim editor"))
+        add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Uses vim editor"))
         on_message = AsyncMock()
         result = await orchestrator.handle_request(
             "what do you know about vim", on_message=on_message
@@ -231,42 +229,3 @@ class TestHandleRequest:
         result = await orchestrator.handle_request("write a Python function")
         assert result.request_type == RequestType.TASK
         assert "type hints" in result.response
-
-
-# --- Post-task Hook ---
-
-
-class TestOnTaskComplete:
-    @pytest.mark.asyncio
-    async def test_extraction_called(self, orchestrator):
-        execution = Execution(
-            job_name="test",
-            agent_name="agent",
-            status=JobStatus.SUCCESS,
-            output="User prefers dark mode and vim keybindings",
-        )
-        with patch(
-            "careful_claude_claw.orchestrator.extract_and_store",
-            new_callable=AsyncMock,
-        ) as mock_extract:
-            mock_extract.return_value = []
-            await orchestrator.on_task_complete(execution)
-            mock_extract.assert_called_once_with(
-                "User prefers dark mode and vim keybindings",
-                source_id=execution.id,
-            )
-
-    @pytest.mark.asyncio
-    async def test_no_output_skips_extraction(self, orchestrator):
-        execution = Execution(
-            job_name="test",
-            agent_name="agent",
-            status=JobStatus.SUCCESS,
-            output=None,
-        )
-        with patch(
-            "careful_claude_claw.orchestrator.extract_and_store",
-            new_callable=AsyncMock,
-        ) as mock_extract:
-            await orchestrator.on_task_complete(execution)
-            mock_extract.assert_not_called()

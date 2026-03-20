@@ -218,9 +218,15 @@ def _extract_file_info(msg: dict) -> tuple[str, str, str] | None:
 class CommandRouter:
     """Routes incoming Telegram messages to handlers."""
 
-    def __init__(self, bot: TelegramBot, orchestrator: Orchestrator | None = None) -> None:
+    def __init__(
+        self,
+        bot: TelegramBot,
+        orchestrator: Orchestrator | None = None,
+        persistent_orchestrator: object | None = None,
+    ) -> None:
         self.bot = bot
         self.orchestrator = orchestrator or Orchestrator()
+        self.persistent_orchestrator = persistent_orchestrator
         self._pending_file: dict | None = None  # stored file info awaiting routing
         self._commands: dict[str, callable] = {
             "/help": self._handle_help,
@@ -237,7 +243,25 @@ class CommandRouter:
         if not text:
             return
 
-        # Use orchestrator for classification
+        # /commands and @replies are handled directly (bypass orchestrator for speed)
+        if text.startswith("/"):
+            await self._handle_command(text)
+            return
+
+        if text.startswith("@"):
+            await self._handle_at_reply(text)
+            return
+
+        # If we have a persistent orchestrator, route everything else through it
+        if self.persistent_orchestrator:
+
+            async def on_message(msg: str) -> None:
+                await self.bot.send_message(msg)
+
+            await self.persistent_orchestrator.submit(text, "telegram", on_message)
+            return
+
+        # Fallback: use stateless orchestrator for classification
         async def on_message(msg: str) -> None:
             await self.bot.send_message(msg)
 
@@ -248,35 +272,50 @@ class CommandRouter:
         if result.request_type == RequestType.MEMORY_QUERY:
             return  # orchestrator already handled it
 
-        if result.request_type == RequestType.FOLLOW_UP:
-            await self._handle_at_reply(text)
-            return
-
-        if result.request_type == RequestType.COMMAND:
-            # Existing command routing
-            cmd = text.split()[0].lower()
-            if "@" in cmd:
-                cmd = cmd.split("@")[0]
-
-            if cmd in self._commands:
-                await self._commands[cmd]()
-            elif cmd == "/run":
-                await self._handle_run(text)
-            elif cmd == "/kill":
-                await self._handle_kill(text)
-            elif cmd == "/reply":
-                await self._handle_reply(text)
-            elif cmd == "/new":
-                await self._handle_new()
-            else:
-                await self.bot.send_message(
-                    "That's not a valid command. Type /help to see all commands."
-                )
-            return
-
         # TASK — spawn agent with memory context
         memory_context = result.response  # enriched system prompt context
         await self._spawn_agent(text, memory_context=memory_context)
+
+    async def _handle_command(self, text: str) -> None:
+        """Route slash commands."""
+        cmd = text.split()[0].lower()
+        if "@" in cmd:
+            cmd = cmd.split("@")[0]
+
+        if cmd in self._commands:
+            await self._commands[cmd]()
+        elif cmd == "/run":
+            await self._handle_run(text)
+        elif cmd == "/kill":
+            await self._handle_kill(text)
+        elif cmd == "/reply":
+            await self._handle_reply(text)
+        elif cmd == "/new":
+            await self._handle_new()
+        elif cmd == "/sleep":
+            await self._handle_sleep()
+        elif cmd == "/wake":
+            await self._handle_wake()
+        else:
+            await self.bot.send_message(
+                "That's not a valid command. Type /help to see all commands."
+            )
+
+    async def _handle_sleep(self) -> None:
+        if self.persistent_orchestrator:
+            await self.bot.send_message("Putting Claw to sleep...")
+            await self.persistent_orchestrator.sleep()
+            await self.bot.send_message("Claw is now asleep.")
+        else:
+            await self.bot.send_message("Persistent orchestrator not enabled.")
+
+    async def _handle_wake(self) -> None:
+        if self.persistent_orchestrator:
+            await self.bot.send_message("Waking Claw...")
+            await self.persistent_orchestrator.wake()
+            await self.bot.send_message("Claw is now awake.")
+        else:
+            await self.bot.send_message("Persistent orchestrator not enabled.")
 
     async def _handle_help(self) -> None:
         lines = [
@@ -288,11 +327,13 @@ class CommandRouter:
             "`/jobs`  — Job definitions",
             "`/runs`  — Recent execution history",
             "`/skills`  — Available skills",
+            "`/sleep`  — Put Claw to sleep (consolidate memories)",
+            "`/wake`  — Wake Claw up",
             "`/help`  — This message",
             "",
             "*Task commands* (run in background):",
             "`/run <skill>`  — Run a named skill",
-            "Free text  — Treated as a task, spawns an agent",
+            "Free text  — Routed to Claw (persistent orchestrator)",
             "",
             "*Active task commands:*",
             "`/kill <name>`  — Kill a running task",
@@ -315,7 +356,7 @@ class CommandRouter:
         if sessions:
             lines.append(f"*Active Tasks ({len(sessions)})*")
             for s in sessions:
-                lines.append(f"  `{s.name}` (exec: {s.execution_id[:8]})")
+                lines.append(f"  `{s.name}` (exec: {s.execution_id})")
         else:
             lines.append("No active tasks.")
 
@@ -484,8 +525,8 @@ class CommandRouter:
         async def on_message(msg: str) -> None:
             await bot.send_message(msg)
 
-        async def _run_with_extraction() -> None:
-            execution = await run_interactive_agent(
+        task = asyncio.create_task(
+            run_interactive_agent(
                 name=name,
                 task=text,
                 on_message=on_message,
@@ -493,10 +534,7 @@ class CommandRouter:
                 system_prompt=system_prompt,
                 allowed_tools=TELEGRAM_CONVERSATIONAL_TOOLS,
             )
-            # Trigger async memory extraction
-            asyncio.create_task(orchestrator.on_task_complete(execution))
-
-        task = asyncio.create_task(_run_with_extraction())
+        )
         session = get_session(name)
         if session:
             session.task = task
@@ -668,7 +706,18 @@ async def run_telegram_listener() -> None:
 
     bot = TelegramBot(token, chat_id)
     orchestrator = Orchestrator()
-    router = CommandRouter(bot, orchestrator=orchestrator)
+
+    # Create persistent orchestrator and wake it
+    from .persistent_orchestrator import PersistentOrchestrator
+
+    persistent_orch = PersistentOrchestrator()
+    try:
+        await persistent_orch.wake()
+    except Exception:
+        logger.warning("Failed to start persistent orchestrator, falling back to stateless")
+        persistent_orch = None
+
+    router = CommandRouter(bot, orchestrator=orchestrator, persistent_orchestrator=persistent_orch)
 
     try:
         me = await bot.get_me()
@@ -723,5 +772,10 @@ async def run_telegram_listener() -> None:
     except asyncio.CancelledError:
         logger.info("Telegram listener cancelled.")
     finally:
+        if persistent_orch and persistent_orch.is_awake:
+            try:
+                await persistent_orch.sleep()
+            except Exception:
+                logger.warning("Failed to sleep orchestrator on shutdown")
         await bot.close()
         logger.info("Telegram listener stopped.")

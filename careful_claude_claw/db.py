@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from .models import Execution, Job, Memory
+from .models import Execution, Job, Memory, OrchestratorState
 
 DB_PATH = Path("claw.db")
 
@@ -16,8 +16,19 @@ def get_connection() -> sqlite3.Connection:
 
 def init_db() -> None:
     with get_connection() as conn:
+        # Drop triggers first, then FTS, then tables
+        conn.execute("DROP TRIGGER IF EXISTS memories_au")
+        conn.execute("DROP TRIGGER IF EXISTS memories_ad")
+        conn.execute("DROP TRIGGER IF EXISTS memories_ai")
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute("DROP TABLE IF EXISTS memories")
+        conn.execute("DROP TABLE IF EXISTS active_agents")
+        conn.execute("DROP TABLE IF EXISTS executions")
+        conn.execute("DROP TABLE IF EXISTS jobs")
+        conn.execute("DROP TABLE IF EXISTS orchestrator_state")
+
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
+            CREATE TABLE jobs (
                 name TEXT PRIMARY KEY,
                 task TEXT DEFAULT '',
                 skill_name TEXT,
@@ -29,8 +40,8 @@ def init_db() -> None:
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS executions (
-                id TEXT PRIMARY KEY,
+            CREATE TABLE executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 job_name TEXT NOT NULL,
                 agent_name TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -42,8 +53,8 @@ def init_db() -> None:
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS active_agents (
-                execution_id TEXT PRIMARY KEY,
+            CREATE TABLE active_agents (
+                execution_id INTEGER PRIMARY KEY,
                 agent_name TEXT NOT NULL,
                 job_name TEXT,
                 task TEXT NOT NULL,
@@ -51,16 +62,19 @@ def init_db() -> None:
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 memory_type TEXT NOT NULL,
                 content TEXT NOT NULL,
                 source TEXT,
-                source_id TEXT,
+                source_id INTEGER,
                 tags TEXT,
                 category TEXT,
                 metadata TEXT,
-                embedding BLOB,
+                importance REAL NOT NULL DEFAULT 0.5,
+                decay_rate REAL NOT NULL DEFAULT 0.0,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 expires_at TEXT,
@@ -69,32 +83,49 @@ def init_db() -> None:
         """)
         # FTS5 virtual table for full-text search
         conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
                 content, tags, category,
                 content='memories', content_rowid='rowid'
             )
         """)
         # Triggers to keep FTS in sync
         conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+            CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
                 INSERT INTO memories_fts(rowid, content, tags, category)
                 VALUES (NEW.rowid, NEW.content, NEW.tags, NEW.category);
             END
         """)
         conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+            CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
                 INSERT INTO memories_fts(memories_fts, rowid, content, tags, category)
                 VALUES ('delete', OLD.rowid, OLD.content, OLD.tags, OLD.category);
             END
         """)
         conn.execute("""
-            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
                 INSERT INTO memories_fts(memories_fts, rowid, content, tags, category)
                 VALUES ('delete', OLD.rowid, OLD.content, OLD.tags, OLD.category);
                 INSERT INTO memories_fts(rowid, content, tags, category)
                 VALUES (NEW.rowid, NEW.content, NEW.tags, NEW.category);
             END
         """)
+        # Single-row orchestrator state table
+        conn.execute("""
+            CREATE TABLE orchestrator_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                session_id TEXT,
+                is_awake INTEGER NOT NULL DEFAULT 0,
+                last_wake_at TEXT,
+                last_sleep_at TEXT,
+                core_briefing TEXT DEFAULT '',
+                total_messages_handled INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        # Seed the single row
+        conn.execute(
+            "INSERT INTO orchestrator_state (id, is_awake, core_briefing, total_messages_handled) "
+            "VALUES (1, 0, '', 0)"
+        )
 
 
 # --- Jobs ---
@@ -160,13 +191,13 @@ def list_jobs(cron_only: bool = False) -> list[dict]:
 # --- Executions ---
 
 
-def insert_execution(execution: Execution) -> None:
+def insert_execution(execution: Execution) -> int:
+    """Insert an execution and return the auto-generated ID."""
     with get_connection() as conn:
-        conn.execute(
-            "INSERT INTO executions (id, job_name, agent_name, status, attempt, "
-            "started_at, ended_at, output, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cursor = conn.execute(
+            "INSERT INTO executions (job_name, agent_name, status, attempt, "
+            "started_at, ended_at, output, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                execution.id,
                 execution.job_name,
                 execution.agent_name,
                 execution.status,
@@ -177,6 +208,8 @@ def insert_execution(execution: Execution) -> None:
                 execution.error,
             ),
         )
+        execution.id = cursor.lastrowid
+        return execution.id
 
 
 def update_execution(execution: Execution) -> None:
@@ -196,7 +229,7 @@ def update_execution(execution: Execution) -> None:
         )
 
 
-def update_execution_status(execution_id: str, status: str) -> None:
+def update_execution_status(execution_id: int, status: str) -> None:
     with get_connection() as conn:
         conn.execute("UPDATE executions SET status=? WHERE id=?", (status, execution_id))
 
@@ -234,7 +267,7 @@ def register_active_agent(execution: Execution) -> None:
         )
 
 
-def unregister_active_agent(execution_id: str) -> None:
+def unregister_active_agent(execution_id: int) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM active_agents WHERE execution_id=?", (execution_id,))
 
@@ -248,14 +281,15 @@ def list_active_agents() -> list[dict]:
 # --- Memories ---
 
 
-def insert_memory(memory: Memory) -> None:
+def insert_memory(memory: Memory) -> int:
+    """Insert a memory and return the auto-generated ID."""
     with get_connection() as conn:
-        conn.execute(
-            "INSERT INTO memories (id, memory_type, content, source, source_id, "
-            "tags, category, metadata, embedding, created_at, updated_at, "
-            "expires_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cursor = conn.execute(
+            "INSERT INTO memories (memory_type, content, source, source_id, "
+            "tags, category, metadata, importance, decay_rate, access_count, "
+            "last_accessed_at, created_at, updated_at, "
+            "expires_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                memory.id,
                 memory.memory_type,
                 memory.content,
                 memory.source,
@@ -263,16 +297,21 @@ def insert_memory(memory: Memory) -> None:
                 json.dumps(memory.tags),
                 memory.category,
                 json.dumps(memory.metadata) if memory.metadata else None,
-                memory.embedding,
+                memory.importance,
+                memory.decay_rate,
+                memory.access_count,
+                memory.last_accessed_at.isoformat() if memory.last_accessed_at else None,
                 memory.created_at.isoformat(),
                 memory.updated_at.isoformat(),
                 memory.expires_at.isoformat() if memory.expires_at else None,
                 1 if memory.is_active else 0,
             ),
         )
+        memory.id = cursor.lastrowid
+        return memory.id
 
 
-def get_memory(memory_id: str) -> dict | None:
+def get_memory(memory_id: int) -> dict | None:
     with get_connection() as conn:
         row = conn.execute(
             "SELECT * FROM memories WHERE id=? AND is_active=1", (memory_id,)
@@ -284,7 +323,8 @@ def update_memory(memory: Memory) -> None:
     with get_connection() as conn:
         conn.execute(
             "UPDATE memories SET memory_type=?, content=?, source=?, source_id=?, "
-            "tags=?, category=?, metadata=?, embedding=?, updated_at=?, "
+            "tags=?, category=?, metadata=?, importance=?, decay_rate=?, "
+            "access_count=?, last_accessed_at=?, updated_at=?, "
             "expires_at=?, is_active=? WHERE id=?",
             (
                 memory.memory_type,
@@ -294,7 +334,10 @@ def update_memory(memory: Memory) -> None:
                 json.dumps(memory.tags),
                 memory.category,
                 json.dumps(memory.metadata) if memory.metadata else None,
-                memory.embedding,
+                memory.importance,
+                memory.decay_rate,
+                memory.access_count,
+                memory.last_accessed_at.isoformat() if memory.last_accessed_at else None,
                 memory.updated_at.isoformat(),
                 memory.expires_at.isoformat() if memory.expires_at else None,
                 1 if memory.is_active else 0,
@@ -303,11 +346,20 @@ def update_memory(memory: Memory) -> None:
         )
 
 
-def delete_memory(memory_id: str) -> None:
+def delete_memory(memory_id: int) -> None:
     """Soft delete — sets is_active=0."""
     with get_connection() as conn:
         conn.execute(
             "UPDATE memories SET is_active=0, updated_at=? WHERE id=?",
+            (datetime.now().isoformat(), memory_id),
+        )
+
+
+def record_memory_access(memory_id: int) -> None:
+    """Increment access_count and update last_accessed_at."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id=?",
             (datetime.now().isoformat(), memory_id),
         )
 
@@ -412,3 +464,53 @@ def cleanup_expired_memories() -> int:
             (now, now),
         )
         return cursor.rowcount
+
+
+# --- Orchestrator State ---
+
+
+def get_orchestrator_state() -> OrchestratorState:
+    """Get the single-row orchestrator state."""
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM orchestrator_state WHERE id=1").fetchone()
+        if not row:
+            return OrchestratorState()
+        return OrchestratorState(
+            session_id=row["session_id"],
+            is_awake=bool(row["is_awake"]),
+            last_wake_at=(
+                datetime.fromisoformat(row["last_wake_at"]) if row["last_wake_at"] else None
+            ),
+            last_sleep_at=(
+                datetime.fromisoformat(row["last_sleep_at"]) if row["last_sleep_at"] else None
+            ),
+            core_briefing=row["core_briefing"] or "",
+            total_messages_handled=row["total_messages_handled"],
+        )
+
+
+def upsert_orchestrator_state(state: OrchestratorState) -> None:
+    """Update the single-row orchestrator state."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE orchestrator_state SET session_id=?, is_awake=?, "
+            "last_wake_at=?, last_sleep_at=?, core_briefing=?, "
+            "total_messages_handled=? WHERE id=1",
+            (
+                state.session_id,
+                1 if state.is_awake else 0,
+                state.last_wake_at.isoformat() if state.last_wake_at else None,
+                state.last_sleep_at.isoformat() if state.last_sleep_at else None,
+                state.core_briefing,
+                state.total_messages_handled,
+            ),
+        )
+
+
+def increment_message_count() -> None:
+    """Atomically increment total_messages_handled."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE orchestrator_state SET total_messages_handled = total_messages_handled + 1 "
+            "WHERE id=1"
+        )

@@ -262,13 +262,9 @@ async def test_free_text_spawns_agent(router, mock_bot):
         mock_run.return_value = Execution(
             job_name="interactive", agent_name="tg-T1", status=JobStatus.SUCCESS
         )
-        with patch(
-            "careful_claude_claw.orchestrator.extract_and_store", new_callable=AsyncMock
-        ) as mock_extract:
-            mock_extract.return_value = []
-            await router.handle_message("what time is it?")
-            # Let the background task run
-            await asyncio.sleep(0.1)
+        await router.handle_message("what time is it?")
+        # Let the background task run
+        await asyncio.sleep(0.1)
         mock_bot.send_message.assert_any_call("@T1: Starting...")
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["task"] == "what time is it?"
@@ -308,7 +304,7 @@ async def test_tasks_empty(router, mock_bot):
 @pytest.mark.asyncio
 async def test_tasks_with_sessions(router, mock_bot):
     client = MagicMock()
-    session = AgentSession(name="task-1", execution_id="e1", client=client)
+    session = AgentSession(name="task-1", execution_id=1, client=client)
     register_session(session)
 
     await router.handle_message("/tasks")
@@ -428,7 +424,7 @@ async def test_at_reply_no_message(router, mock_bot):
 @pytest.mark.asyncio
 async def test_status_with_sessions(router, mock_bot):
     client = MagicMock()
-    session = AgentSession(name="task-1", execution_id="e1234567-rest", client=client)
+    session = AgentSession(name="task-1", execution_id=1, client=client)
     register_session(session)
 
     await router.handle_message("/status")
@@ -492,7 +488,7 @@ async def test_handle_file_with_target(router, mock_bot, tmp_path):
     client.query = AsyncMock()
     session = AgentSession(
         name="T1",
-        execution_id="e1",
+        execution_id=1,
         client=client,
         cwd=tmp_path,
         is_temp_workspace=False,
@@ -522,8 +518,8 @@ async def test_handle_file_with_target(router, mock_bot, tmp_path):
 async def test_handle_file_asks_which_agent(router, mock_bot):
     """Multiple active agents + no @name → asks user which agent."""
     client = MagicMock()
-    s1 = AgentSession(name="T1", execution_id="e1", client=client)
-    s2 = AgentSession(name="T2", execution_id="e2", client=client)
+    s1 = AgentSession(name="T1", execution_id=1, client=client)
+    s2 = AgentSession(name="T2", execution_id=2, client=client)
     register_session(s1)
     register_session(s2)
 

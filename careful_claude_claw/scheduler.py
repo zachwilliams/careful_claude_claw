@@ -64,8 +64,6 @@ async def _run_scheduled_task(
             system_prompt=system_prompt,
         )
         logger.info("Job %s completed: %s", job_name, execution.status)
-        # Async memory extraction
-        asyncio.create_task(orchestrator.on_task_complete(execution))
     except Exception:
         logger.exception("Job %s failed", job_name)
 
@@ -100,9 +98,35 @@ def build_scheduler() -> AsyncIOScheduler:
     return scheduler
 
 
+def add_sleep_job(scheduler: AsyncIOScheduler, cron_expr: str = "0 2 * * *") -> None:
+    """Add a nightly sleep/consolidation job to the scheduler."""
+
+    async def _sleep_task() -> None:
+        from .persistent_orchestrator import PersistentOrchestrator
+
+        orch = PersistentOrchestrator()
+        if orch.is_awake:
+            logger.info("Running nightly consolidation...")
+            await orch.sleep()
+
+    try:
+        trigger = _parse_cron(cron_expr)
+        scheduler.add_job(
+            _sleep_task,
+            trigger=trigger,
+            id="__orchestrator_sleep",
+            name="Orchestrator Sleep",
+            replace_existing=True,
+        )
+        logger.info("Sleep job scheduled: %s", cron_expr)
+    except ValueError:
+        logger.error("Invalid sleep cron: %s", cron_expr)
+
+
 async def run_scheduler() -> None:
     """Start the scheduler and run until interrupted."""
     scheduler = build_scheduler()
+    add_sleep_job(scheduler)
     scheduler.start()
     logger.info("Scheduler started. Press Ctrl+C to stop.")
     try:

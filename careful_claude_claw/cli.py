@@ -275,7 +275,7 @@ def memory_group() -> None:
     "--type",
     "memory_type",
     default=None,
-    type=click.Choice(["preference", "summary", "fact", "task_context"]),
+    type=click.Choice(["preference", "decision", "observation", "procedure"]),
     help="Filter by memory type.",
 )
 @click.option("--limit", default=50, help="Maximum number of memories to show.")
@@ -297,7 +297,7 @@ def memory_list(memory_type: str | None, limit: int) -> None:
 
     for m in memories:
         table.add_row(
-            m.id[:8],
+            str(m.id),
             m.memory_type,
             m.content[:80],
             m.category or "-",
@@ -313,7 +313,7 @@ def memory_list(memory_type: str | None, limit: int) -> None:
     "--type",
     "memory_type",
     default="preference",
-    type=click.Choice(["preference", "summary", "fact", "task_context"]),
+    type=click.Choice(["preference", "decision", "observation", "procedure"]),
     help="Memory type.",
 )
 @click.option("--category", default=None, help="Category label.")
@@ -350,7 +350,7 @@ def memory_search(query: str, limit: int) -> None:
     table.add_column("Content")
 
     for m in results:
-        table.add_row(m.id[:8], m.memory_type, m.content[:80])
+        table.add_row(str(m.id), m.memory_type, m.content[:80])
 
     console.print(table)
 
@@ -360,8 +360,8 @@ def memory_search(query: str, limit: int) -> None:
 def memory_delete(memory_id: str) -> None:
     """Delete a memory by ID (soft delete)."""
     init_db()
-    mem_delete(memory_id)
-    console.print(f"[green]Memory {memory_id[:8]} deleted.[/green]")
+    mem_delete(int(memory_id))
+    console.print(f"[green]Memory {memory_id} deleted.[/green]")
 
 
 # --- Skills ---
@@ -509,6 +509,115 @@ def telegram() -> None:
         asyncio.run(run_telegram_listener())
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
+
+
+# --- Chat (interactive orchestrator) ---
+
+
+@cli.command()
+@click.option("--cwd", default=None, help="Working directory for sub-agents.")
+def chat(cwd: str | None) -> None:
+    """Start an interactive chat session with the persistent orchestrator."""
+    init_db()
+
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    from .persistent_orchestrator import PersistentOrchestrator
+
+    orch = PersistentOrchestrator()
+
+    async def _chat_loop() -> None:
+        await orch.wake()
+        console.print("[bold cyan]Claw is awake. Type your message (Ctrl+C to quit).[/bold cyan]")
+        console.print()
+
+        async def on_message(msg: str) -> None:
+            console.print(f"[bold green]Claw:[/bold green] {msg}")
+            console.print()
+
+        try:
+            while True:
+                try:
+                    text = click.prompt("You", prompt_suffix="> ")
+                except click.Abort:
+                    break
+                if not text.strip():
+                    continue
+                if text.strip().lower() in ("/quit", "/exit"):
+                    break
+                await orch.submit(text, "cli", on_message)
+                # Wait a moment for the pump to process
+                await asyncio.sleep(0.5)
+        except (KeyboardInterrupt, EOFError):
+            pass
+        finally:
+            await orch.sleep()
+            console.print("[dim]Session ended.[/dim]")
+
+    try:
+        asyncio.run(_chat_loop())
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
+
+
+# --- Sleep/Wake ---
+
+
+@cli.command("sleep")
+def sleep_cmd() -> None:
+    """Put the orchestrator to sleep (consolidate memories and disconnect)."""
+    init_db()
+
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    from .db import get_orchestrator_state
+
+    state = get_orchestrator_state()
+    if not state.is_awake:
+        console.print("[yellow]Orchestrator is already asleep.[/yellow]")
+        return
+
+    from .persistent_orchestrator import PersistentOrchestrator
+
+    orch = PersistentOrchestrator()
+
+    async def _sleep() -> None:
+        await orch.wake()  # reconnect to consolidate
+        await orch.sleep()
+
+    asyncio.run(_sleep())
+    console.print("[green]Orchestrator is now asleep.[/green]")
+
+
+@cli.command("wake")
+def wake_cmd() -> None:
+    """Wake the orchestrator (connect and load memories)."""
+    init_db()
+
+    import logging
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    from .persistent_orchestrator import PersistentOrchestrator
+
+    orch = PersistentOrchestrator()
+
+    async def _wake() -> None:
+        await orch.wake()
+        # Keep it alive briefly then detach
+        console.print("[green]Orchestrator is now awake.[/green]")
+        if orch._pump_task:
+            orch._pump_task.cancel()
+            try:
+                await orch._pump_task
+            except Exception:
+                pass
+
+    asyncio.run(_wake())
 
 
 # --- Reset (dev) ---

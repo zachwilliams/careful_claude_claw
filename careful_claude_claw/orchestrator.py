@@ -14,9 +14,7 @@ from .memory import (
     list_memories,
     search_memories,
 )
-from .memory_extraction import extract_and_store, summarize_session
 from .models import (
-    Execution,
     Memory,
     MemorySource,
     MemoryType,
@@ -119,7 +117,7 @@ class Orchestrator:
                 break
 
         # Detect type from keywords
-        memory_type = MemoryType.FACT
+        memory_type = MemoryType.OBSERVATION
         content_lower = content.lower()
         if any(w in content_lower for w in ["prefer", "like to", "always", "never", "style"]):
             memory_type = MemoryType.PREFERENCE
@@ -209,38 +207,3 @@ class Orchestrator:
             request_type=request_type,
             response=memory_context,
         )
-
-    async def on_task_complete(
-        self,
-        execution: Execution,
-        output: str | None = None,
-    ) -> None:
-        """Post-task hook: extract memories from task output in the background.
-
-        Should be called via asyncio.create_task() to avoid blocking.
-        """
-        text = output or execution.output
-        if not text:
-            return
-
-        try:
-            await extract_and_store(text, source_id=execution.id)
-        except Exception:
-            logger.exception("Post-task memory extraction failed for %s", execution.id)
-
-    async def on_session_complete(
-        self,
-        session_name: str,
-        output: str,
-        execution: Execution | None = None,
-    ) -> None:
-        """Post-session hook: summarize session and extract memories."""
-        try:
-            summary = await summarize_session(session_name, output)
-            if summary:
-                add_memory(summary)
-
-            source_id = execution.id if execution else None
-            await extract_and_store(output, source_id=source_id)
-        except Exception:
-            logger.exception("Post-session extraction failed for %s", session_name)
