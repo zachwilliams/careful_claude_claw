@@ -24,6 +24,8 @@ from .agent_session import (
     send_to_agent,
 )
 from .db import init_db, list_executions, list_jobs
+from .models import RequestType
+from .orchestrator import Orchestrator
 from .skills import discover_skills, get_skill
 
 logger = logging.getLogger(__name__)
@@ -216,8 +218,9 @@ def _extract_file_info(msg: dict) -> tuple[str, str, str] | None:
 class CommandRouter:
     """Routes incoming Telegram messages to handlers."""
 
-    def __init__(self, bot: TelegramBot) -> None:
+    def __init__(self, bot: TelegramBot, orchestrator: Orchestrator | None = None) -> None:
         self.bot = bot
+        self.orchestrator = orchestrator or Orchestrator()
         self._pending_file: dict | None = None  # stored file info awaiting routing
         self._commands: dict[str, callable] = {
             "/help": self._handle_help,
@@ -229,39 +232,51 @@ class CommandRouter:
         }
 
     async def handle_message(self, text: str) -> None:
-        """Route a message to the appropriate handler."""
+        """Route a message through the orchestrator, then to appropriate handler."""
         text = text.strip()
         if not text:
             return
 
-        # Check for @name routing (e.g. "@task-1 do something")
-        if text.startswith("@"):
+        # Use orchestrator for classification
+        async def on_message(msg: str) -> None:
+            await self.bot.send_message(msg)
+
+        result = await self.orchestrator.handle_request(text, on_message=on_message)
+
+        if result.request_type == RequestType.MEMORY_ADD:
+            return  # orchestrator already handled it
+        if result.request_type == RequestType.MEMORY_QUERY:
+            return  # orchestrator already handled it
+
+        if result.request_type == RequestType.FOLLOW_UP:
             await self._handle_at_reply(text)
             return
 
-        # Check for exact commands or /run
-        cmd = text.split()[0].lower()
-        # Strip bot mention suffix (e.g. /status@CarefulClawBot)
-        if "@" in cmd:
-            cmd = cmd.split("@")[0]
+        if result.request_type == RequestType.COMMAND:
+            # Existing command routing
+            cmd = text.split()[0].lower()
+            if "@" in cmd:
+                cmd = cmd.split("@")[0]
 
-        if cmd in self._commands:
-            await self._commands[cmd]()
-        elif cmd == "/run":
-            await self._handle_run(text)
-        elif cmd == "/kill":
-            await self._handle_kill(text)
-        elif cmd == "/reply":
-            await self._handle_reply(text)
-        elif cmd == "/new":
-            await self._handle_new()
-        elif cmd.startswith("/"):
-            await self.bot.send_message(
-                "That's not a valid command. Type /help to see all commands."
-            )
-        else:
-            # Free text -> spawn agent
-            await self._spawn_agent(text)
+            if cmd in self._commands:
+                await self._commands[cmd]()
+            elif cmd == "/run":
+                await self._handle_run(text)
+            elif cmd == "/kill":
+                await self._handle_kill(text)
+            elif cmd == "/reply":
+                await self._handle_reply(text)
+            elif cmd == "/new":
+                await self._handle_new()
+            else:
+                await self.bot.send_message(
+                    "That's not a valid command. Type /help to see all commands."
+                )
+            return
+
+        # TASK — spawn agent with memory context
+        memory_context = result.response  # enriched system prompt context
+        await self._spawn_agent(text, memory_context=memory_context)
 
     async def _handle_help(self) -> None:
         lines = [
@@ -456,25 +471,32 @@ class CommandRouter:
         if session:
             session.task = bg_task
 
-    async def _spawn_agent(self, text: str) -> None:
+    async def _spawn_agent(self, text: str, memory_context: str = "") -> None:
         """Spawn a background agent for free-text tasks."""
         name = generate_name("T")
         await self.bot.send_message(f"@{name}: Starting...")
         bot = self.bot
+        orchestrator = self.orchestrator
+
+        # Build system prompt with memory context
+        system_prompt = orchestrator.build_system_prompt(TELEGRAM_SYSTEM_PROMPT, memory_context)
 
         async def on_message(msg: str) -> None:
             await bot.send_message(msg)
 
-        task = asyncio.create_task(
-            run_interactive_agent(
+        async def _run_with_extraction() -> None:
+            execution = await run_interactive_agent(
                 name=name,
                 task=text,
                 on_message=on_message,
                 agent_name=f"tg-{name}",
-                system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 allowed_tools=TELEGRAM_CONVERSATIONAL_TOOLS,
             )
-        )
+            # Trigger async memory extraction
+            asyncio.create_task(orchestrator.on_task_complete(execution))
+
+        task = asyncio.create_task(_run_with_extraction())
         session = get_session(name)
         if session:
             session.task = task
@@ -645,7 +667,8 @@ async def run_telegram_listener() -> None:
     init_db()
 
     bot = TelegramBot(token, chat_id)
-    router = CommandRouter(bot)
+    orchestrator = Orchestrator()
+    router = CommandRouter(bot, orchestrator=orchestrator)
 
     try:
         me = await bot.get_me()

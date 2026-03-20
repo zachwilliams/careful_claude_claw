@@ -254,11 +254,22 @@ async def test_unrecognized_slash_command_does_not_spawn_agent(router, mock_bot)
 
 @pytest.mark.asyncio
 async def test_free_text_spawns_agent(router, mock_bot):
+    import asyncio
+
     with patch(
         "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
     ) as mock_run:
-        await router.handle_message("what time is it?")
-        mock_bot.send_message.assert_called_with("@T1: Starting...")
+        mock_run.return_value = Execution(
+            job_name="interactive", agent_name="tg-T1", status=JobStatus.SUCCESS
+        )
+        with patch(
+            "careful_claude_claw.orchestrator.extract_and_store", new_callable=AsyncMock
+        ) as mock_extract:
+            mock_extract.return_value = []
+            await router.handle_message("what time is it?")
+            # Let the background task run
+            await asyncio.sleep(0.1)
+        mock_bot.send_message.assert_any_call("@T1: Starting...")
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["task"] == "what time is it?"
         assert mock_run.call_args.kwargs["name"] == "T1"

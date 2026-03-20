@@ -14,7 +14,20 @@ from .db import (
     list_executions,
     list_jobs,
 )
-from .models import Job, JobStatus
+from .memory import (
+    add_memory as mem_add,
+)
+from .memory import (
+    delete_memory as mem_delete,
+)
+from .memory import (
+    list_memories as mem_list,
+)
+from .memory import (
+    search_memories as mem_search,
+)
+from .models import Job, JobStatus, Memory, MemorySource, MemoryType
+from .orchestrator import Orchestrator
 from .skills import discover_skills, get_skill
 
 console = Console()
@@ -75,6 +88,11 @@ def run(
 
     tools_list = allowed_tools.split(",") if allowed_tools else None
 
+    # Enrich with memory context
+    orchestrator = Orchestrator()
+    memory_context = orchestrator.retrieve_context(task)
+    system_prompt = orchestrator.build_system_prompt(None, memory_context)
+
     with console.status("[bold green]Running agent...[/bold green]"):
         execution = asyncio.run(
             run_agent(
@@ -84,6 +102,7 @@ def run(
                 backoff_seconds=backoff,
                 cwd=cwd,
                 allowed_tools=tools_list,
+                system_prompt=system_prompt,
             )
         )
 
@@ -241,6 +260,108 @@ def jobs_runs(job: str | None, limit: int) -> None:
         )
 
     console.print(table)
+
+
+# --- Memory ---
+
+
+@cli.group("memory")
+def memory_group() -> None:
+    """Manage persistent memories."""
+
+
+@memory_group.command("list")
+@click.option(
+    "--type",
+    "memory_type",
+    default=None,
+    type=click.Choice(["preference", "summary", "fact", "task_context"]),
+    help="Filter by memory type.",
+)
+@click.option("--limit", default=50, help="Maximum number of memories to show.")
+def memory_list(memory_type: str | None, limit: int) -> None:
+    """List stored memories."""
+    init_db()
+    mtype = MemoryType(memory_type) if memory_type else None
+    memories = mem_list(memory_type=mtype, limit=limit)
+    if not memories:
+        console.print("[yellow]No memories found.[/yellow]")
+        return
+
+    table = Table(title="Memories")
+    table.add_column("ID", style="dim", max_width=8)
+    table.add_column("Type", style="cyan")
+    table.add_column("Content")
+    table.add_column("Category")
+    table.add_column("Tags")
+
+    for m in memories:
+        table.add_row(
+            m.id[:8],
+            m.memory_type,
+            m.content[:80],
+            m.category or "-",
+            ", ".join(m.tags) if m.tags else "-",
+        )
+
+    console.print(table)
+
+
+@memory_group.command("add")
+@click.argument("content")
+@click.option(
+    "--type",
+    "memory_type",
+    default="preference",
+    type=click.Choice(["preference", "summary", "fact", "task_context"]),
+    help="Memory type.",
+)
+@click.option("--category", default=None, help="Category label.")
+@click.option("--tags", default=None, help="Comma-separated tags.")
+def memory_add(content: str, memory_type: str, category: str | None, tags: str | None) -> None:
+    """Add a new memory."""
+    init_db()
+    tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    memory = Memory(
+        memory_type=MemoryType(memory_type),
+        content=content,
+        source=MemorySource.USER,
+        category=category,
+        tags=tag_list,
+    )
+    mem_add(memory)
+    console.print(f"[green]Memory added: {content[:60]}[/green]")
+
+
+@memory_group.command("search")
+@click.argument("query")
+@click.option("--limit", default=20, help="Maximum results.")
+def memory_search(query: str, limit: int) -> None:
+    """Search memories using full-text search."""
+    init_db()
+    results = mem_search(query=query, limit=limit)
+    if not results:
+        console.print("[yellow]No matching memories found.[/yellow]")
+        return
+
+    table = Table(title=f"Search: {query}")
+    table.add_column("ID", style="dim", max_width=8)
+    table.add_column("Type", style="cyan")
+    table.add_column("Content")
+
+    for m in results:
+        table.add_row(m.id[:8], m.memory_type, m.content[:80])
+
+    console.print(table)
+
+
+@memory_group.command("delete")
+@click.argument("memory_id")
+def memory_delete(memory_id: str) -> None:
+    """Delete a memory by ID (soft delete)."""
+    init_db()
+    mem_delete(memory_id)
+    console.print(f"[green]Memory {memory_id[:8]} deleted.[/green]")
 
 
 # --- Skills ---
