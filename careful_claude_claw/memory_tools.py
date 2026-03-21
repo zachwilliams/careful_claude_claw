@@ -433,11 +433,8 @@ def _format_memories(memories: list[dict]) -> str:
 # --- MCP Server Factory ---
 
 ALL_TOOLS = [
-    memory_search_tool,
     memory_write_tool,
     memory_update_tool,
-    memory_delete_tool,
-    memory_list_tool,
     spawn_agent_tool,
     list_agents_tool,
     kill_agent_tool,

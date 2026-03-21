@@ -15,7 +15,7 @@ from careful_claude_claw.memory import (
     search_memories,
     update_memory,
 )
-from careful_claude_claw.models import Memory, MemorySource, MemoryType
+from careful_claude_claw.models import Memory, MemorySource, MemoryType, score_memory
 
 
 @pytest.fixture(autouse=True)
@@ -245,6 +245,20 @@ def test_cleanup_expired_memories():
     assert len(all_mems) == 2
 
 
+def test_expired_memory_not_returned_by_search():
+    """Expired and soft-deleted memory should not appear in search results."""
+    mem = Memory(
+        memory_type=MemoryType.OBSERVATION,
+        content="Expired observation about databases",
+        expires_at=datetime.now() - timedelta(hours=1),
+    )
+    add_memory(mem)
+    expire_old_memories()
+
+    results = search_memories(query="databases")
+    assert len(results) == 0
+
+
 # --- Relevant Memories ---
 
 
@@ -295,6 +309,27 @@ def test_get_relevant_memories_scored_ranking():
         assert results[0].importance >= results[1].importance
 
 
+def test_get_relevant_memories_records_access():
+    """Verify access_count and last_accessed_at are updated after retrieval."""
+    mem = Memory(
+        memory_type=MemoryType.PREFERENCE,
+        content="User prefers TypeScript",
+        importance=0.8,
+    )
+    add_memory(mem)
+
+    # Before retrieval
+    fetched_before = get_memory(mem.id)
+    assert fetched_before.access_count == 0
+
+    get_relevant_memories("TypeScript")
+
+    # After retrieval
+    fetched_after = get_memory(mem.id)
+    assert fetched_after.access_count >= 1
+    assert fetched_after.last_accessed_at is not None
+
+
 # --- Memory with metadata ---
 
 
@@ -322,3 +357,64 @@ def test_add_memory_sets_decay_rate():
     pref = Memory(memory_type=MemoryType.PREFERENCE, content="test pref")
     add_memory(pref)
     assert pref.decay_rate == 0.0  # PREFERENCE is permanent
+
+
+# --- Scoring ---
+
+
+def test_score_observation_decays_over_time():
+    """Old observation should score lower than fresh one."""
+    fresh = Memory(
+        memory_type=MemoryType.OBSERVATION,
+        content="Fresh obs",
+        importance=0.5,
+        decay_rate=0.3,
+        updated_at=datetime.now(),
+    )
+    old = Memory(
+        memory_type=MemoryType.OBSERVATION,
+        content="Old obs",
+        importance=0.5,
+        decay_rate=0.3,
+        updated_at=datetime.now() - timedelta(days=30),
+    )
+
+    assert score_memory(fresh) > score_memory(old)
+
+
+def test_score_preference_never_decays():
+    """Preference score should be same regardless of age."""
+    fresh = Memory(
+        memory_type=MemoryType.PREFERENCE,
+        content="Fresh pref",
+        importance=0.5,
+        decay_rate=0.0,
+        updated_at=datetime.now(),
+    )
+    old = Memory(
+        memory_type=MemoryType.PREFERENCE,
+        content="Old pref",
+        importance=0.5,
+        decay_rate=0.0,
+        updated_at=datetime.now() - timedelta(days=365),
+    )
+
+    assert score_memory(fresh) == pytest.approx(score_memory(old), abs=0.001)
+
+
+def test_fts_special_characters():
+    """Search with punctuation should not crash."""
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Uses C++ and C#"))
+    # These should not raise
+    results = search_memories(query="C++")
+    assert isinstance(results, list)
+    results = search_memories(query="what's up?")
+    assert isinstance(results, list)
+
+
+def test_fts_partial_match():
+    """FTS should match partial words like 'data' matching 'database'."""
+    add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Uses PostgreSQL database daily"))
+    results = search_memories(query="data*")
+    # FTS5 prefix queries use *
+    assert len(results) >= 1

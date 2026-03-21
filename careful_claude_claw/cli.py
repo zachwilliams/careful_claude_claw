@@ -614,7 +614,7 @@ def wake_cmd() -> None:
             orch._pump_task.cancel()
             try:
                 await orch._pump_task
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
 
     asyncio.run(_wake())

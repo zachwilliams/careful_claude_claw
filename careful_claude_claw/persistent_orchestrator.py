@@ -24,7 +24,7 @@ from .db import (
     init_db,
     upsert_orchestrator_state,
 )
-from .memory import list_memories
+from .memory import get_relevant_memories, list_memories
 from .memory_tools import create_orchestrator_mcp_server, set_message_callback
 from .models import MemoryType, OrchestratorState, score_memory
 
@@ -34,44 +34,29 @@ MessageCallback = Callable[[str], Awaitable[None]]
 
 MAX_BRIEFING_TOKENS = 2000  # approximate char limit for core briefing
 
+MEMORY_CONTEXT_HEADER = """
+--- Memory Context ---
+{memories}
+--- End Memory Context ---
+"""
+
 SYSTEM_PROMPT = """\
-You are Claw, a persistent AI assistant. You maintain memory across conversations
-and can spawn sub-agents for complex coding tasks.
+You are Claw, a persistent AI assistant with memory and sub-agent capabilities.
 
-## Available MCP Tools
+## Memory
+Relevant memories are auto-injected into each message. Use `memory_write` to store
+new memories and `memory_update` to revise existing ones.
+- `preference`: permanent, high weight — user preferences
+- `decision`: slow decay — key decisions
+- `observation`: decays over weeks — facts about user/project
+- `procedure`: permanent — workflows and processes
+- Set importance 0.0-1.0; use categories and tags for organization
 
-### Memory tools
-- `memory_search` — Search memories by query, type, category
-- `memory_write` — Store a new memory (preference, decision, observation, procedure)
-- `memory_update` — Update existing memory content
-- `memory_delete` — Soft-delete a memory
-- `memory_list` — List memories with optional type filter
+## Sub-agents
+Use `spawn_agent` for coding/file tasks. Manage with `list_agents`, `kill_agent`, `send_to_agent`.
 
-### Sub-agent tools
-- `spawn_agent` — Spawn a sub-agent for coding/file tasks
-- `list_agents` — Show running sub-agents
-- `kill_agent` — Kill a sub-agent by name
-- `send_to_agent` — Send a message to a running sub-agent
-
-### System tools
-- `list_jobs` — Show scheduled jobs
-- `list_skills` — Show available skills
-
-## Memory Guidelines
-- Write memories proactively when you learn something about the user
-- Use `preference` for user preferences (permanent, high weight)
-- Use `decision` for key decisions (slow decay)
-- Use `observation` for facts about user/project (decays over weeks)
-- Use `procedure` for workflows and processes (permanent)
-- Set importance 0.0-1.0 based on how useful the memory will be later
-- Before writing, search to avoid duplicates — update existing memories instead
-- Use categories and tags for organization
-
-## Interaction Style
-- Be concise and direct
-- For coding tasks, spawn a sub-agent rather than doing it inline
-- For questions about the user or past context, search memory first
-- When uncertain, ask rather than assume
+## Style
+Be concise. Spawn sub-agents for coding tasks. Ask when uncertain.
 
 ## Core Briefing
 {core_briefing}
@@ -207,7 +192,20 @@ class PersistentOrchestrator:
                 set_message_callback(pending.callback)
 
                 try:
-                    await self._client.query(pending.text)
+                    # Auto-inject relevant memories into context
+                    query_text = pending.text
+                    memories = get_relevant_memories(query_text, limit=10)
+                    if memories:
+                        lines = []
+                        for m in memories:
+                            prefix = f"[{m.memory_type}]"
+                            if m.category:
+                                prefix += f" ({m.category})"
+                            lines.append(f"{prefix}: {m.content}")
+                        memory_context = MEMORY_CONTEXT_HEADER.format(memories="\n".join(lines))
+                        query_text = f"{memory_context}\n\n{pending.text}"
+
+                    await self._client.query(query_text)
 
                     async for msg in self._client.receive_messages():
                         if isinstance(msg, ResultMessage):

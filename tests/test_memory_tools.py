@@ -5,6 +5,7 @@ import pytest
 import careful_claude_claw.db as db_module
 from careful_claude_claw.memory import add_memory
 from careful_claude_claw.memory_tools import (
+    ALL_TOOLS,
     kill_agent_tool,
     list_agents_tool,
     list_jobs_tool,
@@ -15,6 +16,7 @@ from careful_claude_claw.memory_tools import (
     memory_update_tool,
     memory_write_tool,
     send_to_agent_tool,
+    spawn_agent_tool,
 )
 from careful_claude_claw.models import Job, Memory, MemoryType
 
@@ -28,6 +30,20 @@ def _h(sdk_tool):
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
     db_module.init_db()
+
+
+# --- ALL_TOOLS count (hybrid architecture: only write/update + agent/system tools) ---
+
+
+def test_all_tools_count():
+    """ALL_TOOLS should contain exactly 8 tools (no search/list/delete)."""
+    assert len(ALL_TOOLS) == 8
+    tool_names = [t.name for t in ALL_TOOLS]
+    assert "memory_write" in tool_names
+    assert "memory_update" in tool_names
+    assert "memory_search" not in tool_names
+    assert "memory_list" not in tool_names
+    assert "memory_delete" not in tool_names
 
 
 # --- Memory Tools ---
@@ -49,7 +65,15 @@ async def test_memory_write():
 
 
 @pytest.mark.asyncio
+async def test_memory_write_invalid_type():
+    """Invalid memory type should return error, not crash."""
+    result = await _h(memory_write_tool)({"content": "test", "type": "invalid_type"})
+    assert "Error" in result["content"]
+
+
+@pytest.mark.asyncio
 async def test_memory_search():
+    """memory_search_tool function still works even though removed from ALL_TOOLS."""
     add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Uses PostgreSQL for backend"))
     add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Likes hiking"))
 
@@ -85,6 +109,7 @@ async def test_memory_update_not_found():
 
 @pytest.mark.asyncio
 async def test_memory_delete():
+    """memory_delete_tool function still works even though removed from ALL_TOOLS."""
     mem = Memory(memory_type=MemoryType.OBSERVATION, content="temp fact")
     add_memory(mem)
 
@@ -98,6 +123,7 @@ async def test_memory_delete():
 
 @pytest.mark.asyncio
 async def test_memory_list():
+    """memory_list_tool function still works even though removed from ALL_TOOLS."""
     add_memory(Memory(memory_type=MemoryType.PREFERENCE, content="Pref 1"))
     add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Obs 1"))
 
@@ -140,6 +166,68 @@ async def test_kill_agent_not_found():
 async def test_send_to_agent_not_found():
     result = await _h(send_to_agent_tool)({"name": "nope", "message": "hello"})
     assert "No active agent" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_skill_not_found(monkeypatch):
+    """Nonexistent skill should return error message."""
+    from pathlib import Path
+
+    import careful_claude_claw.skills as skills_module
+
+    monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", Path("/nonexistent"))
+
+    result = await _h(spawn_agent_tool)({"task": "do something", "skill": "nonexistent-skill"})
+    assert "not found" in result["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_list_agents_with_sessions():
+    """Register a mock session, verify it shows in list_agents."""
+    from unittest.mock import MagicMock
+
+    from careful_claude_claw.agent_session import (
+        AGENT_SESSIONS,
+        AgentSession,
+        register_session,
+    )
+
+    AGENT_SESSIONS.clear()
+    try:
+        client = MagicMock()
+        session = AgentSession(name="test-agent", execution_id=42, client=client)
+        register_session(session)
+
+        result = await _h(list_agents_tool)({})
+        assert "test-agent" in result["content"]
+        assert "1" in result["content"]
+    finally:
+        AGENT_SESSIONS.clear()
+
+
+@pytest.mark.asyncio
+async def test_send_to_agent_with_session():
+    """Register a mock session, verify message is sent."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from careful_claude_claw.agent_session import (
+        AGENT_SESSIONS,
+        AgentSession,
+        register_session,
+    )
+
+    AGENT_SESSIONS.clear()
+    try:
+        client = MagicMock()
+        client.query = AsyncMock()
+        session = AgentSession(name="responder", execution_id=1, client=client)
+        register_session(session)
+
+        result = await _h(send_to_agent_tool)({"name": "responder", "message": "hello there"})
+        assert "sent" in result["content"].lower()
+        client.query.assert_awaited_once_with("hello there")
+    finally:
+        AGENT_SESSIONS.clear()
 
 
 # --- System Tools ---
