@@ -132,34 +132,19 @@ async def run_slack_listener() -> None:
     app = AsyncApp(token=bot_token)
     slack_bot = SlackBot(app=app, bot_token=bot_token)
 
-    # If we know the allowed user, open their DM channel so we can send startup messages.
-    if allowed_user_id:
-        try:
-            dm = await app.client.conversations_open(users=allowed_user_id)
-            slack_bot.reply_channel = dm["channel"]["id"]
-            logger.info("Opened DM channel with allowed user: %s", slack_bot.reply_channel)
-        except Exception:
-            logger.warning("Could not open DM channel with allowed user %s", allowed_user_id)
-
     # Start persistent orchestrator (loads memories, connects Claude session)
     from .persistent_orchestrator import PersistentOrchestrator
 
     persistent_orch = PersistentOrchestrator()
     try:
-        await slack_bot.send_message("I am starting up...")
+        logger.info("Starting persistent orchestrator...")
         await asyncio.wait_for(persistent_orch.wake(), timeout=60)
-        await slack_bot.send_message("I am awake and ready.")
+        logger.info("Persistent orchestrator is awake and ready.")
     except TimeoutError:
         logger.warning("Persistent orchestrator timed out, falling back to stateless")
-        await slack_bot.send_message(
-            "I timed out loading my memory. I am running in stateless mode."
-        )
         persistent_orch = None
     except Exception as exc:
         logger.warning("Failed to start persistent orchestrator: %s", exc)
-        await slack_bot.send_message(
-            f"I failed to load my memory: {exc}\nI am running in stateless mode."
-        )
         persistent_orch = None
 
     router = CommandRouter(slack_bot, persistent_orchestrator=persistent_orch)
@@ -236,14 +221,6 @@ async def run_slack_listener() -> None:
             logger.exception("Error handling Slack message: %s", text[:100])
             await slack_bot.send_message("Error processing your message.")
 
-    @app.event("message")
-    async def handle_dm(event: dict, say: object) -> None:  # noqa: ARG001
-        """Handle direct messages to the bot."""
-        # Only process DMs (im = instant message / direct message channel type)
-        if event.get("channel_type") != "im":
-            return
-        await _route_event(event)
-
     @app.event("app_mention")
     async def handle_mention(event: dict, say: object) -> None:  # noqa: ARG001
         """Handle @mentions of the bot in any channel."""
@@ -252,9 +229,6 @@ async def run_slack_listener() -> None:
     @app.event("message")
     async def handle_channel_thread_reply(event: dict, say: object) -> None:  # noqa: ARG001
         """Handle thread replies in channels where the bot is already participating."""
-        # DMs are handled by handle_dm above.
-        if event.get("channel_type") == "im":
-            return
         thread_ts = event.get("thread_ts")
         if not thread_ts:
             return
