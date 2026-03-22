@@ -26,7 +26,7 @@ from .models import Execution, JobStatus
 
 logger = logging.getLogger(__name__)
 
-# Type alias for the callback that sends messages to Telegram
+# Type alias for the callback that sends messages back to the user
 MessageCallback = Callable[[str], Awaitable[None]]
 
 
@@ -194,7 +194,7 @@ async def run_interactive_agent(
     """Spawn an interactive agent using ClaudeSDKClient.
 
     Creates a persistent client session that supports follow-up messages
-    and interrupts. Sends results to Telegram via on_message callback.
+    and interrupts. Sends results via on_message callback.
     The session stays alive after the first result to allow follow-ups,
     and auto-closes after IDLE_TIMEOUT_SECONDS of inactivity.
     """
