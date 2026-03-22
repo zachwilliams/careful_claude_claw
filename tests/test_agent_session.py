@@ -45,12 +45,12 @@ def reset_counter():
     mod._name_counter = 0
 
 
-def _make_session(name: str = "task-1") -> AgentSession:
+def _make_session(name: str = "task-1", execution_id: int = 1) -> AgentSession:
     client = MagicMock()
     client.interrupt = AsyncMock()
     client.disconnect = AsyncMock()
     client.query = AsyncMock()
-    return AgentSession(name=name, execution_id="test-exec-id", client=client)
+    return AgentSession(name=name, execution_id=execution_id, client=client)
 
 
 # --- generate_name ---
@@ -100,8 +100,8 @@ def test_unregister_missing_is_noop():
 
 
 def test_list_sessions():
-    s1 = _make_session("a")
-    s2 = _make_session("b")
+    s1 = _make_session("a", execution_id=1)
+    s2 = _make_session("b", execution_id=2)
     register_session(s1)
     register_session(s2)
     sessions = list_sessions()
@@ -122,7 +122,7 @@ def test_get_session_case_insensitive():
 
 @pytest.mark.asyncio
 async def test_kill_session_case_insensitive():
-    session = _make_session("T2")
+    session = _make_session("T2", execution_id=10)
     session.client.interrupt = AsyncMock()
     session.client.disconnect = AsyncMock()
     register_session(session)
@@ -148,9 +148,7 @@ async def test_send_to_agent_case_insensitive():
 async def test_kill_session_success():
     from careful_claude_claw.models import Execution
 
-    session = _make_session("kill-me")
     ex = Execution(
-        id="test-exec-id",
         job_name="test-job",
         agent_name="test",
         started_at=datetime.now(UTC),
@@ -158,6 +156,7 @@ async def test_kill_session_success():
     db_module.insert_execution(ex)
     db_module.register_active_agent(ex)
 
+    session = _make_session("kill-me", execution_id=ex.id)
     session.task = MagicMock()
     session.task.done.return_value = False
     session.task.cancel = MagicMock()
@@ -184,17 +183,14 @@ async def test_kill_all_sessions():
     from careful_claude_claw.models import Execution
 
     for i in range(3):
-        exec_id = f"exec-{i}"
         ex = Execution(
-            id=exec_id,
             job_name="test-job",
             agent_name="test",
             started_at=datetime.now(UTC),
         )
         db_module.insert_execution(ex)
         db_module.register_active_agent(ex)
-        session = _make_session(f"agent-{i}")
-        session.execution_id = exec_id
+        session = _make_session(f"agent-{i}", execution_id=ex.id)
         register_session(session)
 
     count = await kill_all_sessions()
@@ -272,9 +268,7 @@ async def test_kill_session_cleans_workspace(tmp_path):
     workspace.mkdir(parents=True)
     (workspace / "temp.txt").write_text("temp data")
 
-    exec_id = "kill-cleanup-exec"
     ex = Execution(
-        id=exec_id,
         job_name="test-job",
         agent_name="test",
         started_at=datetime.now(UTC),
@@ -282,8 +276,7 @@ async def test_kill_session_cleans_workspace(tmp_path):
     db_module.insert_execution(ex)
     db_module.register_active_agent(ex)
 
-    session = _make_session("K1")
-    session.execution_id = exec_id
+    session = _make_session("K1", execution_id=ex.id)
     session.cwd = workspace
     session.is_temp_workspace = True
     session.task = MagicMock()

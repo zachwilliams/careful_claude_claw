@@ -22,6 +22,7 @@ from .agent_session import (
     send_to_agent,
 )
 from .db import list_executions, list_jobs
+from .orchestrator import Orchestrator
 from .skills import discover_skills, get_skill
 
 logger = logging.getLogger(__name__)
@@ -93,8 +94,15 @@ class CommandRouter:
     Works with any BotClient implementation.
     """
 
-    def __init__(self, bot: BotClient) -> None:
+    def __init__(
+        self,
+        bot: BotClient,
+        orchestrator: Orchestrator | None = None,
+        persistent_orchestrator: object | None = None,
+    ) -> None:
         self.bot = bot
+        self.orchestrator = orchestrator or Orchestrator()
+        self.persistent_orchestrator = persistent_orchestrator
         self._pending_file: dict | None = None
         self._commands: dict[str, object] = {
             "/help": self._handle_help,
@@ -111,12 +119,43 @@ class CommandRouter:
         if not text:
             return
 
-        # Check for @name routing (e.g. "@task-1 do something")
+        # /commands and @replies bypass the orchestrator for speed
+        if text.startswith("/"):
+            await self._handle_command(text)
+            return
+
         if text.startswith("@"):
             await self._handle_at_reply(text)
             return
 
-        # Check for exact commands or /run
+        # Route through persistent orchestrator if available
+        if self.persistent_orchestrator:
+            reply_fn = self.bot.get_reply_fn()
+
+            async def on_message(msg: str) -> None:
+                await reply_fn(msg)
+
+            await self.persistent_orchestrator.submit(text, self.bot.platform, on_message)
+            return
+
+        # Fallback: stateless orchestrator for memory context injection
+        from .models import RequestType
+
+        reply_fn = self.bot.get_reply_fn()
+
+        async def on_message_fallback(msg: str) -> None:
+            await reply_fn(msg)
+
+        result = await self.orchestrator.handle_request(text, on_message=on_message_fallback)
+
+        if result.request_type in (RequestType.MEMORY_ADD, RequestType.MEMORY_QUERY):
+            return  # orchestrator already replied
+
+        memory_context = result.response
+        await self._spawn_agent(text, memory_context=memory_context)
+
+    async def _handle_command(self, text: str) -> None:
+        """Route slash commands."""
         cmd = text.split()[0].lower()
         # Strip bot mention suffix (e.g. /status@littleflame)
         if "@" in cmd:
@@ -132,12 +171,14 @@ class CommandRouter:
             await self._handle_reply(text)
         elif cmd == "/new":
             await self._handle_new()
-        elif cmd.startswith("/"):
+        elif cmd == "/sleep":
+            await self._handle_sleep()
+        elif cmd == "/wake":
+            await self._handle_wake()
+        else:
             await self.bot.send_message(
                 "That's not a valid command. Type /help to see all commands."
             )
-        else:
-            await self._spawn_agent(text)
 
     async def _handle_help(self) -> None:
         lines = [
@@ -149,11 +190,13 @@ class CommandRouter:
             "`/jobs`  — Job definitions",
             "`/runs`  — Recent execution history",
             "`/skills`  — Available skills",
+            "`/sleep`  — Put littleflame to sleep (consolidate memories)",
+            "`/wake`  — Wake littleflame up",
             "`/help`  — This message",
             "",
             "*Task commands* (run in background):",
             "`/run <skill>`  — Run a named skill",
-            "Free text  — Treated as a task, spawns an agent",
+            "Free text  — Routed to littleflame (persistent orchestrator)",
             "",
             "*Active task commands:*",
             "`/kill <name>`  — Kill a running task",
@@ -331,11 +374,31 @@ class CommandRouter:
         if session:
             session.task = bg_task
 
-    async def _spawn_agent(self, text: str) -> None:
+    async def _handle_sleep(self) -> None:
+        if self.persistent_orchestrator:
+            await self.bot.send_message("Putting littleflame to sleep...")
+            await self.persistent_orchestrator.sleep()
+            await self.bot.send_message("littleflame is now asleep.")
+        else:
+            await self.bot.send_message("Persistent orchestrator not enabled.")
+
+    async def _handle_wake(self) -> None:
+        if self.persistent_orchestrator:
+            await self.bot.send_message("Waking littleflame...")
+            await self.persistent_orchestrator.wake()
+            await self.bot.send_message("littleflame is now awake.")
+        else:
+            await self.bot.send_message("Persistent orchestrator not enabled.")
+
+    async def _spawn_agent(self, text: str, memory_context: str = "") -> None:
         """Spawn a background agent for free-text tasks."""
         name = generate_name("T")
         await self.bot.send_message(f"@{name}: Starting...")
         reply_fn = self.bot.get_reply_fn()
+
+        system_prompt = self.orchestrator.build_system_prompt(
+            CONVERSATIONAL_SYSTEM_PROMPT, memory_context
+        )
 
         async def on_message(msg: str) -> None:
             await reply_fn(msg)
@@ -346,7 +409,7 @@ class CommandRouter:
                 task=text,
                 on_message=on_message,
                 agent_name=f"{self.bot.platform}-{name}",
-                system_prompt=CONVERSATIONAL_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 allowed_tools=CONVERSATIONAL_TOOLS,
             )
         )
