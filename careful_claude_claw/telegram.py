@@ -24,6 +24,8 @@ from .agent_session import (
     send_to_agent,
 )
 from .db import init_db, list_executions, list_jobs
+from .models import RequestType
+from .orchestrator import Orchestrator
 from .skills import discover_skills, get_skill
 
 logger = logging.getLogger(__name__)
@@ -216,8 +218,15 @@ def _extract_file_info(msg: dict) -> tuple[str, str, str] | None:
 class CommandRouter:
     """Routes incoming Telegram messages to handlers."""
 
-    def __init__(self, bot: TelegramBot) -> None:
+    def __init__(
+        self,
+        bot: TelegramBot,
+        orchestrator: Orchestrator | None = None,
+        persistent_orchestrator: object | None = None,
+    ) -> None:
         self.bot = bot
+        self.orchestrator = orchestrator or Orchestrator()
+        self.persistent_orchestrator = persistent_orchestrator
         self._pending_file: dict | None = None  # stored file info awaiting routing
         self._commands: dict[str, callable] = {
             "/help": self._handle_help,
@@ -229,19 +238,47 @@ class CommandRouter:
         }
 
     async def handle_message(self, text: str) -> None:
-        """Route a message to the appropriate handler."""
+        """Route a message through the orchestrator, then to appropriate handler."""
         text = text.strip()
         if not text:
             return
 
-        # Check for @name routing (e.g. "@task-1 do something")
+        # /commands and @replies are handled directly (bypass orchestrator for speed)
+        if text.startswith("/"):
+            await self._handle_command(text)
+            return
+
         if text.startswith("@"):
             await self._handle_at_reply(text)
             return
 
-        # Check for exact commands or /run
+        # If we have a persistent orchestrator, route everything else through it
+        if self.persistent_orchestrator:
+
+            async def on_message(msg: str) -> None:
+                await self.bot.send_message(msg)
+
+            await self.persistent_orchestrator.submit(text, "telegram", on_message)
+            return
+
+        # Fallback: use stateless orchestrator for classification
+        async def on_message(msg: str) -> None:
+            await self.bot.send_message(msg)
+
+        result = await self.orchestrator.handle_request(text, on_message=on_message)
+
+        if result.request_type == RequestType.MEMORY_ADD:
+            return  # orchestrator already handled it
+        if result.request_type == RequestType.MEMORY_QUERY:
+            return  # orchestrator already handled it
+
+        # TASK — spawn agent with memory context
+        memory_context = result.response  # enriched system prompt context
+        await self._spawn_agent(text, memory_context=memory_context)
+
+    async def _handle_command(self, text: str) -> None:
+        """Route slash commands."""
         cmd = text.split()[0].lower()
-        # Strip bot mention suffix (e.g. /status@CarefulClawBot)
         if "@" in cmd:
             cmd = cmd.split("@")[0]
 
@@ -255,13 +292,30 @@ class CommandRouter:
             await self._handle_reply(text)
         elif cmd == "/new":
             await self._handle_new()
-        elif cmd.startswith("/"):
+        elif cmd == "/sleep":
+            await self._handle_sleep()
+        elif cmd == "/wake":
+            await self._handle_wake()
+        else:
             await self.bot.send_message(
                 "That's not a valid command. Type /help to see all commands."
             )
+
+    async def _handle_sleep(self) -> None:
+        if self.persistent_orchestrator:
+            await self.bot.send_message("Putting Claw to sleep...")
+            await self.persistent_orchestrator.sleep()
+            await self.bot.send_message("Claw is now asleep.")
         else:
-            # Free text -> spawn agent
-            await self._spawn_agent(text)
+            await self.bot.send_message("Persistent orchestrator not enabled.")
+
+    async def _handle_wake(self) -> None:
+        if self.persistent_orchestrator:
+            await self.bot.send_message("Waking Claw...")
+            await self.persistent_orchestrator.wake()
+            await self.bot.send_message("Claw is now awake.")
+        else:
+            await self.bot.send_message("Persistent orchestrator not enabled.")
 
     async def _handle_help(self) -> None:
         lines = [
@@ -273,11 +327,13 @@ class CommandRouter:
             "`/jobs`  — Job definitions",
             "`/runs`  — Recent execution history",
             "`/skills`  — Available skills",
+            "`/sleep`  — Put Claw to sleep (consolidate memories)",
+            "`/wake`  — Wake Claw up",
             "`/help`  — This message",
             "",
             "*Task commands* (run in background):",
             "`/run <skill>`  — Run a named skill",
-            "Free text  — Treated as a task, spawns an agent",
+            "Free text  — Routed to Claw (persistent orchestrator)",
             "",
             "*Active task commands:*",
             "`/kill <name>`  — Kill a running task",
@@ -300,7 +356,7 @@ class CommandRouter:
         if sessions:
             lines.append(f"*Active Tasks ({len(sessions)})*")
             for s in sessions:
-                lines.append(f"  `{s.name}` (exec: {s.execution_id[:8]})")
+                lines.append(f"  `{s.name}` (exec: {s.execution_id})")
         else:
             lines.append("No active tasks.")
 
@@ -456,11 +512,15 @@ class CommandRouter:
         if session:
             session.task = bg_task
 
-    async def _spawn_agent(self, text: str) -> None:
+    async def _spawn_agent(self, text: str, memory_context: str = "") -> None:
         """Spawn a background agent for free-text tasks."""
         name = generate_name("T")
         await self.bot.send_message(f"@{name}: Starting...")
         bot = self.bot
+        orchestrator = self.orchestrator
+
+        # Build system prompt with memory context
+        system_prompt = orchestrator.build_system_prompt(TELEGRAM_SYSTEM_PROMPT, memory_context)
 
         async def on_message(msg: str) -> None:
             await bot.send_message(msg)
@@ -471,7 +531,7 @@ class CommandRouter:
                 task=text,
                 on_message=on_message,
                 agent_name=f"tg-{name}",
-                system_prompt=TELEGRAM_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 allowed_tools=TELEGRAM_CONVERSATIONAL_TOOLS,
             )
         )
@@ -645,15 +705,43 @@ async def run_telegram_listener() -> None:
     init_db()
 
     bot = TelegramBot(token, chat_id)
-    router = CommandRouter(bot)
+    orchestrator = Orchestrator()
 
     try:
         me = await bot.get_me()
-        logger.info("Telegram bot connected: @%s", me.get("username", "?"))
+        bot_username = me.get("username", "?")
+        logger.info("Telegram bot connected: @%s", bot_username)
     except Exception:
         logger.exception("Failed to connect to Telegram")
         await bot.close()
         return
+
+    # Create persistent orchestrator and wake it
+    from .persistent_orchestrator import PersistentOrchestrator
+
+    await bot.send_message("I am starting up...", parse_mode=None)
+
+    persistent_orch = PersistentOrchestrator()
+    try:
+        await bot.send_message("I am loading my memory...", parse_mode=None)
+        await asyncio.wait_for(persistent_orch.wake(), timeout=60)
+        await bot.send_message("I am awake and ready.", parse_mode=None)
+    except TimeoutError:
+        logger.warning("Persistent orchestrator timed out, falling back to stateless")
+        await bot.send_message(
+            "I timed out loading my memory. I am running in stateless mode.",
+            parse_mode=None,
+        )
+        persistent_orch = None
+    except Exception as exc:
+        logger.warning("Failed to start persistent orchestrator: %s", exc)
+        await bot.send_message(
+            f"I failed to load my memory: {exc}\nI am running in stateless mode.",
+            parse_mode=None,
+        )
+        persistent_orch = None
+
+    router = CommandRouter(bot, orchestrator=orchestrator, persistent_orchestrator=persistent_orch)
 
     offset: int | None = None
     try:
@@ -700,5 +788,10 @@ async def run_telegram_listener() -> None:
     except asyncio.CancelledError:
         logger.info("Telegram listener cancelled.")
     finally:
+        if persistent_orch and persistent_orch.is_awake:
+            try:
+                await persistent_orch.sleep()
+            except Exception:
+                logger.warning("Failed to sleep orchestrator on shutdown")
         await bot.close()
         logger.info("Telegram listener stopped.")

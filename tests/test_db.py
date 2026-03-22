@@ -20,6 +20,8 @@ def test_init_db_creates_tables():
     assert "jobs" in names
     assert "executions" in names
     assert "active_agents" in names
+    assert "memories" in names
+    assert "orchestrator_state" in names
 
 
 # --- Jobs ---
@@ -95,7 +97,9 @@ def test_insert_and_list_executions():
         started_at=datetime.now(UTC),
         output="done",
     )
-    db_module.insert_execution(ex)
+    returned_id = db_module.insert_execution(ex)
+    assert isinstance(returned_id, int)
+    assert ex.id == returned_id
 
     rows = db_module.list_executions()
     assert len(rows) == 1
@@ -147,12 +151,12 @@ def test_list_executions_empty():
     assert db_module.list_executions() == []
 
 
-def test_insert_preserves_id():
+def test_insert_returns_autoincrement_id():
     ex = Execution(job_name="job", agent_name="agent")
-    original_id = ex.id
+    assert ex.id is None
     db_module.insert_execution(ex)
-    rows = db_module.list_executions()
-    assert rows[0]["id"] == original_id
+    assert isinstance(ex.id, int)
+    assert ex.id >= 1
 
 
 # --- Active Agents ---
@@ -165,6 +169,7 @@ def test_active_agents_crud():
         started_at=datetime.now(UTC),
         status=JobStatus.RUNNING,
     )
+    db_module.insert_execution(ex)
 
     db_module.register_active_agent(ex)
     agents = db_module.list_active_agents()
@@ -174,3 +179,55 @@ def test_active_agents_crud():
 
     db_module.unregister_active_agent(ex.id)
     assert len(db_module.list_active_agents()) == 0
+
+
+# --- Orchestrator State ---
+
+
+def test_orchestrator_state_default():
+    state = db_module.get_orchestrator_state()
+    assert state.is_awake is False
+    assert state.session_id is None
+    assert state.total_messages_handled == 0
+
+
+def test_upsert_orchestrator_state():
+    state = db_module.get_orchestrator_state()
+    state.is_awake = True
+    state.session_id = "sess-123"
+    state.core_briefing = "User prefers concise output"
+    state.total_messages_handled = 42
+    state.last_wake_at = datetime.now(UTC)
+    db_module.upsert_orchestrator_state(state)
+
+    loaded = db_module.get_orchestrator_state()
+    assert loaded.is_awake is True
+    assert loaded.session_id == "sess-123"
+    assert loaded.core_briefing == "User prefers concise output"
+    assert loaded.total_messages_handled == 42
+    assert loaded.last_wake_at is not None
+
+
+def test_increment_message_count():
+    db_module.increment_message_count()
+    db_module.increment_message_count()
+    db_module.increment_message_count()
+    state = db_module.get_orchestrator_state()
+    assert state.total_messages_handled == 3
+
+
+# --- Memory Access Tracking ---
+
+
+def test_record_memory_access():
+    from careful_claude_claw.models import Memory, MemoryType
+
+    mem = Memory(memory_type=MemoryType.OBSERVATION, content="test fact")
+    db_module.insert_memory(mem)
+
+    db_module.record_memory_access(mem.id)
+    db_module.record_memory_access(mem.id)
+
+    row = db_module.get_memory(mem.id)
+    assert row["access_count"] == 2
+    assert row["last_accessed_at"] is not None
