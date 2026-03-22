@@ -7,6 +7,7 @@ with any messaging platform (Telegram, Slack, etc.).
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -75,6 +76,15 @@ class BotClient(ABC):
     @abstractmethod
     async def close(self) -> None:
         """Clean up resources."""
+
+    def get_reply_fn(self) -> Callable[[str], Awaitable[None]]:
+        """Return a send function bound to the current reply context.
+
+        Override in platform clients that have per-message reply context
+        (e.g. Slack channel ID) to snapshot it at spawn time so background
+        agent callbacks reply to the right place.
+        """
+        return self.send_message
 
 
 class CommandRouter:
@@ -303,10 +313,10 @@ class CommandRouter:
 
         name = generate_name("S")
         await self.bot.send_message(f"@{name}: Starting skill `{skill_name}`...")
-        bot = self.bot
+        reply_fn = self.bot.get_reply_fn()
 
         async def on_message(msg: str) -> None:
-            await bot.send_message(msg)
+            await reply_fn(msg)
 
         bg_task = asyncio.create_task(
             run_interactive_agent(
@@ -325,10 +335,10 @@ class CommandRouter:
         """Spawn a background agent for free-text tasks."""
         name = generate_name("T")
         await self.bot.send_message(f"@{name}: Starting...")
-        bot = self.bot
+        reply_fn = self.bot.get_reply_fn()
 
         async def on_message(msg: str) -> None:
-            await bot.send_message(msg)
+            await reply_fn(msg)
 
         task = asyncio.create_task(
             run_interactive_agent(
@@ -427,10 +437,10 @@ class CommandRouter:
         task_text = caption or f"Process this {media_type} file: {file_name}"
         name = generate_name("T")
         await self.bot.send_message(f"@{name}: Starting with file...")
-        bot = self.bot
+        reply_fn = self.bot.get_reply_fn()
 
         async def on_message(msg: str) -> None:
-            await bot.send_message(msg)
+            await reply_fn(msg)
 
         bg_task = asyncio.create_task(
             run_interactive_agent(

@@ -11,6 +11,7 @@ is set, messages from any other user are silently ignored.
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import httpx
@@ -42,6 +43,28 @@ class SlackBot(BotClient):
 
     async def close(self) -> None:
         await self._http.aclose()
+
+    def get_reply_fn(self) -> Callable[[str], Awaitable[None]]:
+        """Snapshot the current reply_channel so background agents reply to the right place."""
+        channel = self.reply_channel
+        app = self._app
+
+        async def _send(text: str) -> None:
+            if not channel:
+                logger.warning("get_reply_fn: no channel captured")
+                return
+            chunks = split_message(text, max_len=SLACK_MESSAGE_MAX_LEN)
+            for chunk in chunks:
+                try:
+                    await app.client.chat_postMessage(
+                        channel=channel,
+                        text=chunk,
+                        mrkdwn=True,
+                    )
+                except Exception:
+                    logger.exception("Failed to send Slack message")
+
+        return _send
 
     async def send_message(self, text: str) -> None:
         """Send a message to the current reply channel, auto-splitting if needed."""
