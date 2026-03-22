@@ -70,22 +70,32 @@ uv run ruff format .
 │   └── claw-services                # Service management script (start/stop/restart/status/logs)
 ├── careful_claude_claw/             # Main application package
 │   ├── __init__.py
-│   ├── cli.py                       # CLI entrypoint (click) — run, jobs, status, skills, start, telegram, reset
+│   ├── cli.py                       # CLI entrypoint (click) — run, jobs, memory, status, skills, start, telegram, reset
 │   ├── agent.py                     # One-shot agent spawner (query) + retry logic
 │   ├── agent_session.py             # Interactive agent sessions (ClaudeSDKClient) + session registry
-│   ├── models.py                    # Pydantic models: Job, Execution, Skill
-│   ├── db.py                        # SQLite operations: jobs, executions, active_agents
+│   ├── models.py                    # Pydantic models: Job, Execution, Skill, Memory, OrchestratorState
+│   ├── db.py                        # SQLite operations: jobs, executions, active_agents, memories (FTS5)
+│   ├── memory.py                    # Memory layer: CRUD, search, scoring, consolidation
+│   ├── memory_tools.py              # MCP tools for memory and agent management
+│   ├── orchestrator.py              # Stateless request router + memory context injection
+│   ├── persistent_orchestrator.py   # Long-lived Claude session with memory MCP tools
 │   ├── scheduler.py                 # APScheduler cron wrapper
 │   ├── skills.py                    # Skill discovery from skills/ directories
 │   ├── telegram.py                  # Telegram bot: long-polling, command routing, agent spawning
 │   └── security/
 │       └── __init__.py              # Placeholder — security policy enforcement (Phase 5)
 └── tests/                           # Test suite (mirrors careful_claude_claw/ structure)
+    ├── conftest.py                  # Shared pytest fixtures
     ├── test_models.py
     ├── test_db.py
+    ├── test_memory.py
+    ├── test_memory_tools.py
     ├── test_skills.py
     ├── test_scheduler.py
     ├── test_agent_session.py
+    ├── test_orchestrator.py
+    ├── test_persistent_orchestrator.py
+    ├── test_cli.py
     ├── test_telegram.py
     └── test_agent_integration.py    # Integration test (requires live Claude CLI)
 ```
