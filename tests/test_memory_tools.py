@@ -26,6 +26,14 @@ def _h(sdk_tool):
     return sdk_tool.handler
 
 
+def _text(result: dict) -> str:
+    """Extract text from MCP tool result content blocks."""
+    content = result["content"]
+    if isinstance(content, str):
+        return content
+    return "\n".join(block["text"] for block in content if block.get("type") == "text")
+
+
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
@@ -36,14 +44,14 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 def test_all_tools_count():
-    """ALL_TOOLS should contain exactly 8 tools (no search/list/delete)."""
-    assert len(ALL_TOOLS) == 8
+    """ALL_TOOLS should contain all 11 orchestrator tools."""
+    assert len(ALL_TOOLS) == 11
     tool_names = [t.name for t in ALL_TOOLS]
     assert "memory_write" in tool_names
     assert "memory_update" in tool_names
-    assert "memory_search" not in tool_names
-    assert "memory_list" not in tool_names
-    assert "memory_delete" not in tool_names
+    assert "memory_search" in tool_names
+    assert "memory_list" in tool_names
+    assert "memory_delete" in tool_names
 
 
 # --- Memory Tools ---
@@ -54,7 +62,7 @@ async def test_memory_write():
     result = await _h(memory_write_tool)(
         {"content": "User prefers dark mode", "type": "preference", "importance": 0.8}
     )
-    assert "stored" in result["content"]
+    assert "stored" in _text(result)
 
     from careful_claude_claw.memory import list_memories
 
@@ -68,7 +76,7 @@ async def test_memory_write():
 async def test_memory_write_invalid_type():
     """Invalid memory type should return error, not crash."""
     result = await _h(memory_write_tool)({"content": "test", "type": "invalid_type"})
-    assert "Error" in result["content"]
+    assert "Error" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -78,13 +86,13 @@ async def test_memory_search():
     add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Likes hiking"))
 
     result = await _h(memory_search_tool)({"query": "PostgreSQL"})
-    assert "PostgreSQL" in result["content"]
+    assert "PostgreSQL" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_memory_search_no_results():
     result = await _h(memory_search_tool)({"query": "nonexistent"})
-    assert "0 memories" in result["content"]
+    assert "0 memories" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -93,7 +101,7 @@ async def test_memory_update():
     add_memory(mem)
 
     result = await _h(memory_update_tool)({"id": mem.id, "content": "Likes neovim"})
-    assert "updated" in result["content"]
+    assert "updated" in _text(result)
 
     from careful_claude_claw.memory import get_memory
 
@@ -104,7 +112,7 @@ async def test_memory_update():
 @pytest.mark.asyncio
 async def test_memory_update_not_found():
     result = await _h(memory_update_tool)({"id": 99999, "content": "new content"})
-    assert "not found" in result["content"]
+    assert "not found" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -114,7 +122,7 @@ async def test_memory_delete():
     add_memory(mem)
 
     result = await _h(memory_delete_tool)({"id": mem.id})
-    assert "deleted" in result["content"]
+    assert "deleted" in _text(result)
 
     from careful_claude_claw.memory import get_memory
 
@@ -128,7 +136,7 @@ async def test_memory_list():
     add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Obs 1"))
 
     result = await _h(memory_list_tool)({})
-    assert "2 memories" in result["content"]
+    assert "2 memories" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -137,14 +145,14 @@ async def test_memory_list_with_type():
     add_memory(Memory(memory_type=MemoryType.OBSERVATION, content="Obs 1"))
 
     result = await _h(memory_list_tool)({"type": "preference"})
-    assert "1 memories" in result["content"]
-    assert "Pref 1" in result["content"]
+    assert "1 memories" in _text(result)
+    assert "Pref 1" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_memory_list_empty():
     result = await _h(memory_list_tool)({})
-    assert "No memories" in result["content"]
+    assert "No memories" in _text(result)
 
 
 # --- Sub-agent Tools ---
@@ -153,19 +161,19 @@ async def test_memory_list_empty():
 @pytest.mark.asyncio
 async def test_list_agents_empty():
     result = await _h(list_agents_tool)({})
-    assert "No active agents" in result["content"]
+    assert "No active agents" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_kill_agent_not_found():
     result = await _h(kill_agent_tool)({"name": "nope"})
-    assert "No active agent" in result["content"]
+    assert "No active agent" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_send_to_agent_not_found():
     result = await _h(send_to_agent_tool)({"name": "nope", "message": "hello"})
-    assert "No active agent" in result["content"]
+    assert "No active agent" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -178,7 +186,7 @@ async def test_spawn_agent_skill_not_found(monkeypatch):
     monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", Path("/nonexistent"))
 
     result = await _h(spawn_agent_tool)({"task": "do something", "skill": "nonexistent-skill"})
-    assert "not found" in result["content"].lower()
+    assert "not found" in _text(result).lower()
 
 
 @pytest.mark.asyncio
@@ -199,8 +207,8 @@ async def test_list_agents_with_sessions():
         register_session(session)
 
         result = await _h(list_agents_tool)({})
-        assert "test-agent" in result["content"]
-        assert "1" in result["content"]
+        assert "test-agent" in _text(result)
+        assert "1" in _text(result)
     finally:
         AGENT_SESSIONS.clear()
 
@@ -224,7 +232,7 @@ async def test_send_to_agent_with_session():
         register_session(session)
 
         result = await _h(send_to_agent_tool)({"name": "responder", "message": "hello there"})
-        assert "sent" in result["content"].lower()
+        assert "sent" in _text(result).lower()
         client.query.assert_awaited_once_with("hello there")
     finally:
         AGENT_SESSIONS.clear()
@@ -236,15 +244,15 @@ async def test_send_to_agent_with_session():
 @pytest.mark.asyncio
 async def test_list_jobs_empty():
     result = await _h(list_jobs_tool)({})
-    assert "No jobs" in result["content"]
+    assert "No jobs" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_list_jobs_with_data():
     db_module.insert_job(Job(name="my-job", task="do stuff", cron_expr="0 9 * * *"))
     result = await _h(list_jobs_tool)({})
-    assert "my-job" in result["content"]
-    assert "0 9 * * *" in result["content"]
+    assert "my-job" in _text(result)
+    assert "0 9 * * *" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -255,4 +263,4 @@ async def test_list_skills(monkeypatch):
 
     monkeypatch.setattr(skills_module, "GLOBAL_SKILLS_DIR", Path("/nonexistent"))
     result = await _h(list_skills_tool)({})
-    assert "No skills" in result["content"]
+    assert "No skills" in _text(result)

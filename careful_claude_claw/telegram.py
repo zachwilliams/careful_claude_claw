@@ -707,25 +707,41 @@ async def run_telegram_listener() -> None:
     bot = TelegramBot(token, chat_id)
     orchestrator = Orchestrator()
 
-    # Create persistent orchestrator and wake it
-    from .persistent_orchestrator import PersistentOrchestrator
-
-    persistent_orch = PersistentOrchestrator()
-    try:
-        await persistent_orch.wake()
-    except Exception:
-        logger.warning("Failed to start persistent orchestrator, falling back to stateless")
-        persistent_orch = None
-
-    router = CommandRouter(bot, orchestrator=orchestrator, persistent_orchestrator=persistent_orch)
-
     try:
         me = await bot.get_me()
-        logger.info("Telegram bot connected: @%s", me.get("username", "?"))
+        bot_username = me.get("username", "?")
+        logger.info("Telegram bot connected: @%s", bot_username)
     except Exception:
         logger.exception("Failed to connect to Telegram")
         await bot.close()
         return
+
+    # Create persistent orchestrator and wake it
+    from .persistent_orchestrator import PersistentOrchestrator
+
+    await bot.send_message("I am starting up...", parse_mode=None)
+
+    persistent_orch = PersistentOrchestrator()
+    try:
+        await bot.send_message("I am loading my memory...", parse_mode=None)
+        await asyncio.wait_for(persistent_orch.wake(), timeout=60)
+        await bot.send_message("I am awake and ready.", parse_mode=None)
+    except TimeoutError:
+        logger.warning("Persistent orchestrator timed out, falling back to stateless")
+        await bot.send_message(
+            "I timed out loading my memory. I am running in stateless mode.",
+            parse_mode=None,
+        )
+        persistent_orch = None
+    except Exception as exc:
+        logger.warning("Failed to start persistent orchestrator: %s", exc)
+        await bot.send_message(
+            f"I failed to load my memory: {exc}\nI am running in stateless mode.",
+            parse_mode=None,
+        )
+        persistent_orch = None
+
+    router = CommandRouter(bot, orchestrator=orchestrator, persistent_orchestrator=persistent_orch)
 
     offset: int | None = None
     try:

@@ -41,7 +41,7 @@ MEMORY_CONTEXT_HEADER = """
 """
 
 SYSTEM_PROMPT = """\
-You are Claw, a persistent AI assistant with memory and sub-agent capabilities.
+You are 小火苗 (Miao), a persistent AI assistant with memory and sub-agent capabilities.
 
 ## Memory
 Relevant memories are auto-injected into each message. Use `memory_write` to store
@@ -91,6 +91,7 @@ class PersistentOrchestrator:
         self._state: OrchestratorState = OrchestratorState()
         self._pump_task: asyncio.Task | None = None
         self._mcp_server = create_orchestrator_mcp_server()
+        self._processing: bool = False
 
     @property
     def is_awake(self) -> bool:
@@ -114,9 +115,10 @@ class PersistentOrchestrator:
         opts = ClaudeAgentOptions(
             allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "mcp__*"],
             max_turns=25,
-            setting_sources=["user"],
+            permission_mode="bypassPermissions",
+            setting_sources=[],
             system_prompt=system_prompt,
-            mcp_servers=[self._mcp_server],
+            mcp_servers={"claw_orchestrator": self._mcp_server},
         )
 
         # Try to resume existing session
@@ -182,6 +184,8 @@ class PersistentOrchestrator:
         """Entry point for all interfaces. Auto-wakes if asleep."""
         if not self._state.is_awake:
             await self.wake()
+        if self._processing:
+            await callback("hmmmmm...")
         await self._queue.put(PendingMessage(text=text, source=source, callback=callback))
 
     async def _message_pump(self) -> None:
@@ -189,8 +193,10 @@ class PersistentOrchestrator:
         while True:
             try:
                 pending = await self._queue.get()
+                logger.info("Pump: dequeued message from %s: %s", pending.source, pending.text[:100])
                 set_message_callback(pending.callback)
 
+                self._processing = True
                 try:
                     # Auto-inject relevant memories into context
                     query_text = pending.text
@@ -204,32 +210,43 @@ class PersistentOrchestrator:
                             lines.append(f"{prefix}: {m.content}")
                         memory_context = MEMORY_CONTEXT_HEADER.format(memories="\n".join(lines))
                         query_text = f"{memory_context}\n\n{pending.text}"
+                        logger.info("Pump: injected %d memories", len(memories))
 
+                    logger.info("Pump: sending query to agent...")
                     await self._client.query(query_text)
+                    logger.info("Pump: query sent, waiting for messages...")
 
+                    msg_count = 0
                     async for msg in self._client.receive_messages():
+                        msg_count += 1
+                        logger.info("Pump: received message #%d: %s", msg_count, type(msg).__name__)
                         if isinstance(msg, ResultMessage):
+                            logger.info("Pump: ResultMessage result=%s", (msg.result or "")[:200])
                             if msg.result:
                                 await pending.callback(msg.result)
                             # Capture session_id for resume
                             if hasattr(msg, "session_id") and msg.session_id:
                                 self._state.session_id = msg.session_id
                                 upsert_orchestrator_state(self._state)
+                            break
                         elif isinstance(msg, AssistantMessage):
                             text = _extract_assistant_text(msg)
+                            logger.info("Pump: AssistantMessage text=%s", (text or "")[:200])
                             if text:
                                 await pending.callback(text)
 
+                    logger.info("Pump: finished after %d messages", msg_count)
                     increment_message_count()
                     self._state.total_messages_handled += 1
 
                 except Exception:
-                    logger.exception("Error processing message")
+                    logger.exception("Pump: error processing message")
                     try:
                         await pending.callback("Sorry, I encountered an internal error.")
                     except Exception:
                         pass
                 finally:
+                    self._processing = False
                     set_message_callback(None)
 
             except asyncio.CancelledError:

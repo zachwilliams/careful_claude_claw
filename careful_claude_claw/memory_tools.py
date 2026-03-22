@@ -103,9 +103,9 @@ async def memory_search_tool(params: dict[str, Any]) -> dict[str, Any]:
             )
 
         text = _format_memories(memories_out)
-        return {"content": f"Found {len(memories_out)} memories:\n{text}"}
+        return _text_result(f"Found {len(memories_out)} memories:\n{text}")
     except Exception as e:
-        return {"content": f"Error searching memories: {e}"}
+        return _text_result(f"Error searching memories: {e}", is_error=True)
 
 
 @tool(
@@ -151,9 +151,9 @@ async def memory_write_tool(params: dict[str, Any]) -> dict[str, Any]:
             decay_rate=MEMORY_DECAY_RATES.get(mem_type, 0.0),
         )
         add_memory(memory)
-        return {"content": f"Memory stored (id={memory.id}): {memory.content[:80]}"}
+        return _text_result(f"Memory stored (id={memory.id}): {memory.content[:80]}")
     except Exception as e:
-        return {"content": f"Error writing memory: {e}"}
+        return _text_result(f"Error writing memory: {e}", is_error=True)
 
 
 @tool(
@@ -172,12 +172,12 @@ async def memory_update_tool(params: dict[str, Any]) -> dict[str, Any]:
     try:
         mem = get_memory(params["id"])
         if not mem:
-            return {"content": f"Memory {params['id']} not found."}
+            return _text_result(f"Memory {params['id']} not found.", is_error=True)
         mem.content = params["content"]
         update_memory(mem)
-        return {"content": f"Memory {mem.id} updated."}
+        return _text_result(f"Memory {mem.id} updated.")
     except Exception as e:
-        return {"content": f"Error updating memory: {e}"}
+        return _text_result(f"Error updating memory: {e}", is_error=True)
 
 
 @tool(
@@ -194,9 +194,9 @@ async def memory_update_tool(params: dict[str, Any]) -> dict[str, Any]:
 async def memory_delete_tool(params: dict[str, Any]) -> dict[str, Any]:
     try:
         delete_memory(params["id"])
-        return {"content": f"Memory {params['id']} deleted."}
+        return _text_result(f"Memory {params['id']} deleted.")
     except Exception as e:
-        return {"content": f"Error deleting memory: {e}"}
+        return _text_result(f"Error deleting memory: {e}", is_error=True)
 
 
 @tool(
@@ -225,7 +225,7 @@ async def memory_list_tool(params: dict[str, Any]) -> dict[str, Any]:
         results = list_memories(memory_type=mem_type, limit=limit)
 
         if not results:
-            return {"content": "No memories found."}
+            return _text_result("No memories found.")
 
         memories_out = []
         for mem in results:
@@ -241,9 +241,9 @@ async def memory_list_tool(params: dict[str, Any]) -> dict[str, Any]:
             )
 
         text = _format_memories(memories_out)
-        return {"content": f"Found {len(memories_out)} memories:\n{text}"}
+        return _text_result(f"Found {len(memories_out)} memories:\n{text}")
     except Exception as e:
-        return {"content": f"Error listing memories: {e}"}
+        return _text_result(f"Error listing memories: {e}", is_error=True)
 
 
 # --- Sub-agent Tools ---
@@ -289,9 +289,9 @@ async def spawn_agent_tool(params: dict[str, Any]) -> dict[str, Any]:
                 try:
                     task = Path(skill.file_path).read_text()
                 except OSError:
-                    return {"content": f"Cannot read skill file: {skill.file_path}"}
+                    return _text_result(f"Cannot read skill file: {skill.file_path}", is_error=True)
             else:
-                return {"content": f"Skill not found: {skill_name}"}
+                return _text_result(f"Skill not found: {skill_name}", is_error=True)
 
         name = generate_name("A")
 
@@ -310,9 +310,9 @@ async def spawn_agent_tool(params: dict[str, Any]) -> dict[str, Any]:
             )
         )
 
-        return {"content": f"Agent @{name} spawned for: {task[:100]}"}
+        return _text_result(f"Agent @{name} spawned for: {task[:100]}")
     except Exception as e:
-        return {"content": f"Error spawning agent: {e}"}
+        return _text_result(f"Error spawning agent: {e}", is_error=True)
 
 
 @tool(
@@ -323,12 +323,12 @@ async def spawn_agent_tool(params: dict[str, Any]) -> dict[str, Any]:
 async def list_agents_tool(params: dict[str, Any]) -> dict[str, Any]:
     sessions = list_sessions()
     if not sessions:
-        return {"content": "No active agents."}
+        return _text_result("No active agents.")
 
     lines = [f"Active agents ({len(sessions)}):"]
     for s in sessions:
         lines.append(f"  @{s.name} (exec: {s.execution_id})")
-    return {"content": "\n".join(lines)}
+    return _text_result("\n".join(lines))
 
 
 @tool(
@@ -346,10 +346,10 @@ async def kill_agent_tool(params: dict[str, Any]) -> dict[str, Any]:
     try:
         killed = await kill_session(params["name"])
         if killed:
-            return {"content": f"Agent {params['name']} killed."}
-        return {"content": f"No active agent named {params['name']}."}
+            return _text_result(f"Agent {params['name']} killed.")
+        return _text_result(f"No active agent named {params['name']}.", is_error=True)
     except Exception as e:
-        return {"content": f"Error killing agent: {e}"}
+        return _text_result(f"Error killing agent: {e}", is_error=True)
 
 
 @tool(
@@ -368,10 +368,10 @@ async def send_to_agent_tool(params: dict[str, Any]) -> dict[str, Any]:
     try:
         sent = await send_to_agent(params["name"], params["message"])
         if sent:
-            return {"content": f"Message sent to @{params['name']}."}
-        return {"content": f"No active agent named {params['name']}."}
+            return _text_result(f"Message sent to @{params['name']}.")
+        return _text_result(f"No active agent named {params['name']}.", is_error=True)
     except Exception as e:
-        return {"content": f"Error sending to agent: {e}"}
+        return _text_result(f"Error sending to agent: {e}", is_error=True)
 
 
 # --- System Tools ---
@@ -385,7 +385,7 @@ async def send_to_agent_tool(params: dict[str, Any]) -> dict[str, Any]:
 async def list_jobs_tool(params: dict[str, Any]) -> dict[str, Any]:
     jobs = db_list_jobs()
     if not jobs:
-        return {"content": "No jobs configured."}
+        return _text_result("No jobs configured.")
 
     lines = [f"Jobs ({len(jobs)}):"]
     for j in jobs:
@@ -393,7 +393,7 @@ async def list_jobs_tool(params: dict[str, Any]) -> dict[str, Any]:
         cron = f" [{j['cron_expr']}]" if j.get("cron_expr") else ""
         enabled = " (disabled)" if not j["enabled"] else ""
         lines.append(f"  {j['name']}{cron}{enabled}: {task_or_skill}")
-    return {"content": "\n".join(lines)}
+    return _text_result("\n".join(lines))
 
 
 @tool(
@@ -404,16 +404,24 @@ async def list_jobs_tool(params: dict[str, Any]) -> dict[str, Any]:
 async def list_skills_tool(params: dict[str, Any]) -> dict[str, Any]:
     skills = discover_skills()
     if not skills:
-        return {"content": "No skills found."}
+        return _text_result("No skills found.")
 
     lines = [f"Skills ({len(skills)}):"]
     for s in skills:
         desc = f" — {s.description[:60]}" if s.description else ""
         lines.append(f"  {s.name}{desc}")
-    return {"content": "\n".join(lines)}
+    return _text_result("\n".join(lines))
 
 
 # --- Helpers ---
+
+
+def _text_result(text: str, is_error: bool = False) -> dict[str, Any]:
+    """Return a properly formatted MCP tool result."""
+    result: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+    if is_error:
+        result["is_error"] = True
+    return result
 
 
 def _format_memories(memories: list[dict]) -> str:
@@ -433,8 +441,11 @@ def _format_memories(memories: list[dict]) -> str:
 # --- MCP Server Factory ---
 
 ALL_TOOLS = [
+    memory_search_tool,
     memory_write_tool,
     memory_update_tool,
+    memory_delete_tool,
+    memory_list_tool,
     spawn_agent_tool,
     list_agents_tool,
     kill_agent_tool,
