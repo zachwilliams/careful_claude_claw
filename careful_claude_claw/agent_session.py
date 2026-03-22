@@ -36,7 +36,7 @@ IDLE_TIMEOUT_SECONDS = 600  # 10 minutes
 @dataclass
 class AgentSession:
     name: str
-    execution_id: int
+    execution_id: str
     client: ClaudeSDKClient
     task: asyncio.Task | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))

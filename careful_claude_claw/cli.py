@@ -14,20 +14,7 @@ from .db import (
     list_executions,
     list_jobs,
 )
-from .memory import (
-    add_memory as mem_add,
-)
-from .memory import (
-    delete_memory as mem_delete,
-)
-from .memory import (
-    list_memories as mem_list,
-)
-from .memory import (
-    search_memories as mem_search,
-)
-from .models import Job, JobStatus, Memory, MemorySource, MemoryType
-from .orchestrator import Orchestrator
+from .models import Job, JobStatus
 from .skills import discover_skills, get_skill
 
 console = Console()
@@ -88,11 +75,6 @@ def run(
 
     tools_list = allowed_tools.split(",") if allowed_tools else None
 
-    # Enrich with memory context
-    orchestrator = Orchestrator()
-    memory_context = orchestrator.retrieve_context(task)
-    system_prompt = orchestrator.build_system_prompt(None, memory_context)
-
     with console.status("[bold green]Running agent...[/bold green]"):
         execution = asyncio.run(
             run_agent(
@@ -102,7 +84,6 @@ def run(
                 backoff_seconds=backoff,
                 cwd=cwd,
                 allowed_tools=tools_list,
-                system_prompt=system_prompt,
             )
         )
 
@@ -262,108 +243,6 @@ def jobs_runs(job: str | None, limit: int) -> None:
     console.print(table)
 
 
-# --- Memory ---
-
-
-@cli.group("memory")
-def memory_group() -> None:
-    """Manage persistent memories."""
-
-
-@memory_group.command("list")
-@click.option(
-    "--type",
-    "memory_type",
-    default=None,
-    type=click.Choice(["preference", "decision", "observation", "procedure"]),
-    help="Filter by memory type.",
-)
-@click.option("--limit", default=50, help="Maximum number of memories to show.")
-def memory_list(memory_type: str | None, limit: int) -> None:
-    """List stored memories."""
-    init_db()
-    mtype = MemoryType(memory_type) if memory_type else None
-    memories = mem_list(memory_type=mtype, limit=limit)
-    if not memories:
-        console.print("[yellow]No memories found.[/yellow]")
-        return
-
-    table = Table(title="Memories")
-    table.add_column("ID", style="dim", max_width=8)
-    table.add_column("Type", style="cyan")
-    table.add_column("Content")
-    table.add_column("Category")
-    table.add_column("Tags")
-
-    for m in memories:
-        table.add_row(
-            str(m.id),
-            m.memory_type,
-            m.content[:80],
-            m.category or "-",
-            ", ".join(m.tags) if m.tags else "-",
-        )
-
-    console.print(table)
-
-
-@memory_group.command("add")
-@click.argument("content")
-@click.option(
-    "--type",
-    "memory_type",
-    default="preference",
-    type=click.Choice(["preference", "decision", "observation", "procedure"]),
-    help="Memory type.",
-)
-@click.option("--category", default=None, help="Category label.")
-@click.option("--tags", default=None, help="Comma-separated tags.")
-def memory_add(content: str, memory_type: str, category: str | None, tags: str | None) -> None:
-    """Add a new memory."""
-    init_db()
-    tag_list = [t.strip() for t in tags.split(",")] if tags else []
-    memory = Memory(
-        memory_type=MemoryType(memory_type),
-        content=content,
-        source=MemorySource.USER,
-        category=category,
-        tags=tag_list,
-    )
-    mem_add(memory)
-    console.print(f"[green]Memory added: {content[:60]}[/green]")
-
-
-@memory_group.command("search")
-@click.argument("query")
-@click.option("--limit", default=20, help="Maximum results.")
-def memory_search(query: str, limit: int) -> None:
-    """Search memories using full-text search."""
-    init_db()
-    results = mem_search(query=query, limit=limit)
-    if not results:
-        console.print("[yellow]No matching memories found.[/yellow]")
-        return
-
-    table = Table(title=f"Search: {query}")
-    table.add_column("ID", style="dim", max_width=8)
-    table.add_column("Type", style="cyan")
-    table.add_column("Content")
-
-    for m in results:
-        table.add_row(str(m.id), m.memory_type, m.content[:80])
-
-    console.print(table)
-
-
-@memory_group.command("delete")
-@click.argument("memory_id")
-def memory_delete(memory_id: str) -> None:
-    """Delete a memory by ID (soft delete)."""
-    init_db()
-    mem_delete(int(memory_id))
-    console.print(f"[green]Memory {memory_id} deleted.[/green]")
-
-
 # --- Skills ---
 
 
@@ -454,28 +333,45 @@ def status() -> None:
     default=None,
     help="Enable/disable Telegram listener (auto-detects from config).",
 )
-def start(telegram: bool | None) -> None:
-    """Start the scheduler daemon (optionally with Telegram listener)."""
+@click.option(
+    "--slack/--no-slack",
+    default=None,
+    help="Enable/disable Slack listener (auto-detects from config).",
+)
+def start(telegram: bool | None, slack: bool | None) -> None:
+    """Start the scheduler daemon (optionally with Telegram/Slack listeners)."""
     init_db()
 
     import logging
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
+    from .config import settings
     from .scheduler import run_scheduler
-    from .telegram import load_telegram_config, run_telegram_listener
+    from .slack import run_slack_listener
+    from .telegram import run_telegram_listener
 
-    # Auto-detect Telegram if not explicitly set
-    tg_enabled = telegram if telegram is not None else load_telegram_config() is not None
+    # Auto-detect listeners if not explicitly set
+    tg_enabled = telegram if telegram is not None else settings.telegram_configured
+    slack_enabled = slack if slack is not None else settings.slack_configured
 
     async def _run_all() -> None:
         tasks = [run_scheduler()]
         if tg_enabled:
             tasks.append(run_telegram_listener())
+        if slack_enabled:
+            tasks.append(run_slack_listener())
         await asyncio.gather(*tasks)
 
+    listeners = []
     if tg_enabled:
-        console.print("[bold cyan]Starting scheduler + Telegram listener...[/bold cyan]")
+        listeners.append("Telegram")
+    if slack_enabled:
+        listeners.append("Slack")
+
+    if listeners:
+        joined = " + ".join(listeners)
+        console.print(f"[bold cyan]Starting scheduler + {joined} listener(s)...[/bold cyan]")
     else:
         console.print("[bold cyan]Starting scheduler...[/bold cyan]")
 
@@ -497,11 +393,12 @@ def telegram() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    from .telegram import load_telegram_config, run_telegram_listener
+    from .config import settings
+    from .telegram import run_telegram_listener
 
-    if not load_telegram_config():
+    if not settings.telegram_configured:
         console.print("[red]Telegram not configured.[/red]")
-        console.print("[dim]Add botToken and chatId to ~/.mcp-telegram/config.json[/dim]")
+        console.print("[dim]Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env[/dim]")
         return
 
     console.print("[bold cyan]Starting Telegram listener...[/bold cyan]")
@@ -511,113 +408,31 @@ def telegram() -> None:
         console.print("\n[dim]Stopped.[/dim]")
 
 
-# --- Chat (interactive orchestrator) ---
+# --- Slack ---
 
 
 @cli.command()
-@click.option("--cwd", default=None, help="Working directory for sub-agents.")
-def chat(cwd: str | None) -> None:
-    """Start an interactive chat session with the persistent orchestrator."""
+def slack() -> None:
+    """Start the Slack listener (standalone, for dev/testing)."""
     init_db()
 
     import logging
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    from .persistent_orchestrator import PersistentOrchestrator
+    from .config import settings
+    from .slack import run_slack_listener
 
-    orch = PersistentOrchestrator()
-
-    async def _chat_loop() -> None:
-        await orch.wake()
-        console.print("[bold cyan]Claw is awake. Type your message (Ctrl+C to quit).[/bold cyan]")
-        console.print()
-
-        async def on_message(msg: str) -> None:
-            console.print(f"[bold green]Claw:[/bold green] {msg}")
-            console.print()
-
-        try:
-            while True:
-                try:
-                    text = click.prompt("You", prompt_suffix="> ")
-                except click.Abort:
-                    break
-                if not text.strip():
-                    continue
-                if text.strip().lower() in ("/quit", "/exit"):
-                    break
-                await orch.submit(text, "cli", on_message)
-                # Wait a moment for the pump to process
-                await asyncio.sleep(0.5)
-        except (KeyboardInterrupt, EOFError):
-            pass
-        finally:
-            await orch.sleep()
-            console.print("[dim]Session ended.[/dim]")
-
-    try:
-        asyncio.run(_chat_loop())
-    except KeyboardInterrupt:
-        console.print("\n[dim]Stopped.[/dim]")
-
-
-# --- Sleep/Wake ---
-
-
-@cli.command("sleep")
-def sleep_cmd() -> None:
-    """Put the orchestrator to sleep (consolidate memories and disconnect)."""
-    init_db()
-
-    import logging
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-
-    from .db import get_orchestrator_state
-
-    state = get_orchestrator_state()
-    if not state.is_awake:
-        console.print("[yellow]Orchestrator is already asleep.[/yellow]")
+    if not settings.slack_configured:
+        console.print("[red]Slack not configured.[/red]")
+        console.print("[dim]Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env[/dim]")
         return
 
-    from .persistent_orchestrator import PersistentOrchestrator
-
-    orch = PersistentOrchestrator()
-
-    async def _sleep() -> None:
-        await orch.wake()  # reconnect to consolidate
-        await orch.sleep()
-
-    asyncio.run(_sleep())
-    console.print("[green]Orchestrator is now asleep.[/green]")
-
-
-@cli.command("wake")
-def wake_cmd() -> None:
-    """Wake the orchestrator (connect and load memories)."""
-    init_db()
-
-    import logging
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-
-    from .persistent_orchestrator import PersistentOrchestrator
-
-    orch = PersistentOrchestrator()
-
-    async def _wake() -> None:
-        await orch.wake()
-        # Keep it alive briefly then detach
-        console.print("[green]Orchestrator is now awake.[/green]")
-        if orch._pump_task:
-            orch._pump_task.cancel()
-            try:
-                await orch._pump_task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-    asyncio.run(_wake())
+    console.print("[bold cyan]Starting Slack listener...[/bold cyan]")
+    try:
+        asyncio.run(run_slack_listener())
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped.[/dim]")
 
 
 # --- Reset (dev) ---
@@ -659,14 +474,12 @@ def reset(yes: bool) -> None:
     console.print("[green]Database reset.[/green]")
 
     # Clear Telegram messages
-    from .telegram import load_telegram_config
+    from .config import settings
 
-    config = load_telegram_config()
-    if not config:
+    if not settings.telegram_configured:
         console.print("[yellow]Telegram not configured, skipping message cleanup.[/yellow]")
     else:
-        token, chat_id = config
-        deleted = asyncio.run(_clear_telegram(token, chat_id))
+        deleted = asyncio.run(_clear_telegram(settings.telegram_bot_token, settings.telegram_chat_id))
         console.print(f"[green]Deleted {deleted} Telegram message(s).[/green]")
 
     console.print("[bold green]Reset complete.[/bold green]")

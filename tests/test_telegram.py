@@ -1,4 +1,4 @@
-"""Tests for the Telegram bot listener."""
+"""Tests for Telegram-specific bot code and the shared CommandRouter."""
 
 import json
 from datetime import UTC, datetime
@@ -14,13 +14,12 @@ from careful_claude_claw.agent_session import (
     AgentSession,
     register_session,
 )
+from careful_claude_claw.bot import CommandRouter, split_message
+from careful_claude_claw.config import Settings
 from careful_claude_claw.models import Execution, JobStatus
 from careful_claude_claw.telegram import (
-    CommandRouter,
     TelegramBot,
     _extract_file_info,
-    _split_message,
-    load_telegram_config,
 )
 
 
@@ -43,6 +42,8 @@ def clean_sessions():
 def mock_bot():
     bot = MagicMock(spec=TelegramBot)
     bot.send_message = AsyncMock()
+    bot.download_file = AsyncMock()
+    bot.platform = "telegram"
     bot.chat_id = 12345
     return bot
 
@@ -52,73 +53,45 @@ def router(mock_bot):
     return CommandRouter(mock_bot)
 
 
-# --- load_telegram_config ---
+# --- Settings (Telegram) ---
 
 
-def test_load_config_valid(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".mcp-telegram"
-    config_dir.mkdir()
-    config = {"botToken": "123:ABC", "chatId": 99}
-    (config_dir / "config.json").write_text(json.dumps(config))
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-    result = load_telegram_config()
-    assert result == ("123:ABC", 99)
-
-
-def test_load_config_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    assert load_telegram_config() is None
+def test_telegram_configured_when_env_set(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABC")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "99")
+    s = Settings()
+    assert s.telegram_configured
+    assert s.telegram_bot_token == "123:ABC"
+    assert s.telegram_chat_id == 99
 
 
-def test_load_config_invalid_json(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".mcp-telegram"
-    config_dir.mkdir()
-    (config_dir / "config.json").write_text("not json")
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    assert load_telegram_config() is None
+def test_telegram_not_configured_when_env_missing(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    s = Settings()
+    assert not s.telegram_configured
 
 
-def test_load_config_missing_fields(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".mcp-telegram"
-    config_dir.mkdir()
-    (config_dir / "config.json").write_text(json.dumps({"botToken": "abc"}))
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    assert load_telegram_config() is None
+def test_telegram_not_configured_when_only_token(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABC")
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    s = Settings()
+    assert not s.telegram_configured
 
 
-def test_load_config_alt_keys(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".mcp-telegram"
-    config_dir.mkdir()
-    config = {"token": "123:ABC", "chat_id": 42}
-    (config_dir / "config.json").write_text(json.dumps(config))
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-    result = load_telegram_config()
-    assert result == ("123:ABC", 42)
-
-
-def test_load_config_nested_bot(tmp_path, monkeypatch):
-    config_dir = tmp_path / ".mcp-telegram"
-    config_dir.mkdir()
-    config = {"bot": {"token": "123:ABC", "chat_id": "99"}}
-    (config_dir / "config.json").write_text(json.dumps(config))
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-
-    result = load_telegram_config()
-    assert result == ("123:ABC", 99)
-
-
-# --- _split_message ---
+# --- split_message ---
 
 
 def test_split_short_message():
-    assert _split_message("hello") == ["hello"]
+    assert split_message("hello") == ["hello"]
 
 
 def test_split_long_message():
     text = "a" * 5000
-    chunks = _split_message(text, max_len=4096)
+    chunks = split_message(text, max_len=4096)
     assert len(chunks) == 2
     assert len(chunks[0]) == 4096
     assert "".join(chunks) == text
@@ -126,7 +99,7 @@ def test_split_long_message():
 
 def test_split_at_newline():
     text = "a" * 4000 + "\n" + "b" * 200
-    chunks = _split_message(text, max_len=4096)
+    chunks = split_message(text, max_len=4096)
     assert len(chunks) == 2
     assert chunks[0] == "a" * 4000
     assert chunks[1] == "b" * 200
@@ -140,7 +113,7 @@ async def test_help(router, mock_bot):
     await router.handle_message("/help")
     mock_bot.send_message.assert_called_once()
     msg = mock_bot.send_message.call_args[0][0]
-    assert "CarefulClaw Commands" in msg
+    assert "littleflame Commands" in msg
     assert "/status" in msg
 
 
@@ -246,7 +219,7 @@ async def test_unrecognized_slash_command_errors(router, mock_bot):
 @pytest.mark.asyncio
 async def test_unrecognized_slash_command_does_not_spawn_agent(router, mock_bot):
     with patch(
-        "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
+        "careful_claude_claw.bot.run_interactive_agent", new_callable=AsyncMock
     ) as mock_run:
         await router.handle_message("/blah something")
         mock_run.assert_not_called()
@@ -254,18 +227,11 @@ async def test_unrecognized_slash_command_does_not_spawn_agent(router, mock_bot)
 
 @pytest.mark.asyncio
 async def test_free_text_spawns_agent(router, mock_bot):
-    import asyncio
-
     with patch(
-        "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
+        "careful_claude_claw.bot.run_interactive_agent", new_callable=AsyncMock
     ) as mock_run:
-        mock_run.return_value = Execution(
-            job_name="interactive", agent_name="tg-T1", status=JobStatus.SUCCESS
-        )
         await router.handle_message("what time is it?")
-        # Let the background task run
-        await asyncio.sleep(0.1)
-        mock_bot.send_message.assert_any_call("@T1: Starting...")
+        mock_bot.send_message.assert_called_with("@T1: Starting...")
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["task"] == "what time is it?"
         assert mock_run.call_args.kwargs["name"] == "T1"
@@ -273,10 +239,10 @@ async def test_free_text_spawns_agent(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_command_with_bot_mention(router, mock_bot):
-    await router.handle_message("/help@CarefulClawBot")
+    await router.handle_message("/help@littleflameBot")
     mock_bot.send_message.assert_called_once()
     msg = mock_bot.send_message.call_args[0][0]
-    assert "CarefulClaw Commands" in msg
+    assert "littleflame Commands" in msg
 
 
 @pytest.mark.asyncio
@@ -304,7 +270,7 @@ async def test_tasks_empty(router, mock_bot):
 @pytest.mark.asyncio
 async def test_tasks_with_sessions(router, mock_bot):
     client = MagicMock()
-    session = AgentSession(name="task-1", execution_id=1, client=client)
+    session = AgentSession(name="task-1", execution_id="e1", client=client)
     register_session(session)
 
     await router.handle_message("/tasks")
@@ -325,7 +291,7 @@ async def test_kill_no_args(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_kill_named_agent(router, mock_bot):
-    with patch("careful_claude_claw.telegram.kill_session", new_callable=AsyncMock) as mock_kill:
+    with patch("careful_claude_claw.bot.kill_session", new_callable=AsyncMock) as mock_kill:
         mock_kill.return_value = True
         await router.handle_message("/kill task-1")
         mock_kill.assert_awaited_once_with("task-1")
@@ -336,7 +302,7 @@ async def test_kill_named_agent(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_kill_not_found(router, mock_bot):
-    with patch("careful_claude_claw.telegram.kill_session", new_callable=AsyncMock) as mock_kill:
+    with patch("careful_claude_claw.bot.kill_session", new_callable=AsyncMock) as mock_kill:
         mock_kill.return_value = False
         await router.handle_message("/kill nope")
         msg = mock_bot.send_message.call_args[0][0]
@@ -346,7 +312,7 @@ async def test_kill_not_found(router, mock_bot):
 @pytest.mark.asyncio
 async def test_kill_all(router, mock_bot):
     with patch(
-        "careful_claude_claw.telegram.kill_all_sessions", new_callable=AsyncMock
+        "careful_claude_claw.bot.kill_all_sessions", new_callable=AsyncMock
     ) as mock_kill_all:
         mock_kill_all.return_value = 3
         await router.handle_message("/kill all")
@@ -374,7 +340,7 @@ async def test_reply_missing_message(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_reply_sends_to_agent(router, mock_bot):
-    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+    with patch("careful_claude_claw.bot.send_to_agent", new_callable=AsyncMock) as mock_send:
         mock_send.return_value = True
         await router.handle_message("/reply task-1 check the tests")
         mock_send.assert_awaited_once_with("task-1", "check the tests")
@@ -384,7 +350,7 @@ async def test_reply_sends_to_agent(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_reply_agent_not_found(router, mock_bot):
-    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+    with patch("careful_claude_claw.bot.send_to_agent", new_callable=AsyncMock) as mock_send:
         mock_send.return_value = False
         await router.handle_message("/reply nope hello")
         msg = mock_bot.send_message.call_args[0][0]
@@ -396,7 +362,7 @@ async def test_reply_agent_not_found(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_at_reply_sends_to_agent(router, mock_bot):
-    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+    with patch("careful_claude_claw.bot.send_to_agent", new_callable=AsyncMock) as mock_send:
         mock_send.return_value = True
         await router.handle_message("@task-1 what about failing tests?")
         mock_send.assert_awaited_once_with("task-1", "what about failing tests?")
@@ -404,7 +370,7 @@ async def test_at_reply_sends_to_agent(router, mock_bot):
 
 @pytest.mark.asyncio
 async def test_at_reply_agent_not_found(router, mock_bot):
-    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+    with patch("careful_claude_claw.bot.send_to_agent", new_callable=AsyncMock) as mock_send:
         mock_send.return_value = False
         await router.handle_message("@nope hello")
         msg = mock_bot.send_message.call_args[0][0]
@@ -424,7 +390,7 @@ async def test_at_reply_no_message(router, mock_bot):
 @pytest.mark.asyncio
 async def test_status_with_sessions(router, mock_bot):
     client = MagicMock()
-    session = AgentSession(name="task-1", execution_id=1, client=client)
+    session = AgentSession(name="task-1", execution_id="e1234567-rest", client=client)
     register_session(session)
 
     await router.handle_message("/status")
@@ -488,28 +454,20 @@ async def test_handle_file_with_target(router, mock_bot, tmp_path):
     client.query = AsyncMock()
     session = AgentSession(
         name="T1",
-        execution_id=1,
+        execution_id="e1",
         client=client,
         cwd=tmp_path,
         is_temp_workspace=False,
     )
     register_session(session)
 
-    mock_bot.get_file = AsyncMock(return_value={"file_path": "documents/file.pdf"})
     mock_bot.download_file = AsyncMock(return_value=tmp_path / "report.pdf")
 
-    msg = {
-        "document": {"file_id": "abc", "file_name": "report.pdf"},
-        "caption": "@T1 please review this",
-    }
-
-    with patch("careful_claude_claw.telegram.send_to_agent", new_callable=AsyncMock) as mock_send:
+    with patch("careful_claude_claw.bot.send_to_agent", new_callable=AsyncMock) as mock_send:
         mock_send.return_value = True
-        await router.handle_file_message(msg)
-        mock_bot.get_file.assert_awaited_once_with("abc")
+        await router.handle_file_message("abc", "report.pdf", "document", "@T1 please review this")
         mock_bot.download_file.assert_awaited_once()
         mock_send.assert_awaited_once()
-        # Check the message describes the file
         sent_msg = mock_send.call_args[0][1]
         assert "report.pdf" in sent_msg
 
@@ -518,21 +476,17 @@ async def test_handle_file_with_target(router, mock_bot, tmp_path):
 async def test_handle_file_asks_which_agent(router, mock_bot):
     """Multiple active agents + no @name → asks user which agent."""
     client = MagicMock()
-    s1 = AgentSession(name="T1", execution_id=1, client=client)
-    s2 = AgentSession(name="T2", execution_id=2, client=client)
+    s1 = AgentSession(name="T1", execution_id="e1", client=client)
+    s2 = AgentSession(name="T2", execution_id="e2", client=client)
     register_session(s1)
     register_session(s2)
 
-    msg = {
-        "document": {"file_id": "abc", "file_name": "data.csv"},
-    }
-    await router.handle_file_message(msg)
+    await router.handle_file_message("abc", "data.csv", "document", "")
     msg_text = mock_bot.send_message.call_args[0][0]
     assert "Which task" in msg_text
     assert "@T1" in msg_text
     assert "@T2" in msg_text
     assert "/new" in msg_text
-    # Pending file should be stored
     assert router._pending_file is not None
     assert router._pending_file["file_id"] == "abc"
 
@@ -541,17 +495,10 @@ async def test_handle_file_asks_which_agent(router, mock_bot):
 async def test_handle_file_no_agents_spawns(router, mock_bot):
     """No active agents → spawns a new agent with the file."""
     with patch(
-        "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
+        "careful_claude_claw.bot.run_interactive_agent", new_callable=AsyncMock
     ) as mock_run:
-        mock_bot.get_file = AsyncMock(return_value={"file_path": "docs/file.pdf"})
         mock_bot.download_file = AsyncMock()
-
-        msg = {
-            "document": {"file_id": "abc", "file_name": "readme.pdf"},
-            "caption": "summarize this",
-        }
-        await router.handle_file_message(msg)
-        # Should have spawned an agent
+        await router.handle_file_message("abc", "readme.pdf", "document", "summarize this")
         mock_run.assert_called_once()
         assert mock_run.call_args.kwargs["task"] == "summarize this"
 
@@ -575,11 +522,9 @@ async def test_new_with_pending_file(router, mock_bot):
         "caption": "analyze this",
     }
     with patch(
-        "careful_claude_claw.telegram.run_interactive_agent", new_callable=AsyncMock
+        "careful_claude_claw.bot.run_interactive_agent", new_callable=AsyncMock
     ) as mock_run:
-        mock_bot.get_file = AsyncMock(return_value={"file_path": "docs/data.csv"})
         mock_bot.download_file = AsyncMock()
-
         await router.handle_message("/new")
         mock_run.assert_called_once()
         assert router._pending_file is None

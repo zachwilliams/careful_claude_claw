@@ -1,14 +1,4 @@
-import math
-
-from careful_claude_claw.models import (
-    Execution,
-    Job,
-    JobStatus,
-    Memory,
-    MemoryType,
-    OrchestratorState,
-    score_memory,
-)
+from careful_claude_claw.models import Execution, Job, JobStatus
 
 
 def test_job_defaults():
@@ -32,7 +22,8 @@ def test_job_with_cwd():
 
 def test_execution_default_id():
     ex = Execution(job_name="test", agent_name="agent")
-    assert ex.id is None  # None before insert
+    assert ex.id
+    assert len(ex.id) == 36  # UUID4 format
 
 
 def test_execution_default_status():
@@ -53,55 +44,15 @@ def test_execution_status_transitions():
     assert ex.status == JobStatus.SUCCESS
 
 
+def test_execution_unique_ids():
+    ex1 = Execution(job_name="test", agent_name="agent")
+    ex2 = Execution(job_name="test", agent_name="agent")
+    assert ex1.id != ex2.id
+
+
 def test_job_status_enum_values():
     assert JobStatus.PENDING == "pending"
     assert JobStatus.RUNNING == "running"
     assert JobStatus.SUCCESS == "success"
     assert JobStatus.FAILED == "failed"
     assert JobStatus.CANCELLED == "cancelled"
-
-
-def test_memory_type_enum():
-    assert MemoryType.PREFERENCE == "preference"
-    assert MemoryType.DECISION == "decision"
-    assert MemoryType.OBSERVATION == "observation"
-    assert MemoryType.PROCEDURE == "procedure"
-
-
-def test_memory_defaults():
-    mem = Memory(memory_type=MemoryType.OBSERVATION, content="test")
-    assert mem.id is None
-    assert mem.importance == 0.5
-    assert mem.decay_rate == 0.0
-    assert mem.access_count == 0
-    assert mem.last_accessed_at is None
-
-
-def test_score_memory_permanent():
-    mem = Memory(memory_type=MemoryType.PREFERENCE, content="test", importance=1.0, decay_rate=0.0)
-    score = score_memory(mem)
-    # No decay, importance 1.0, type weight 1.2
-    assert abs(score - 1.2) < 0.01
-
-
-def test_score_memory_with_decay():
-    from datetime import datetime, timedelta
-
-    mem = Memory(
-        memory_type=MemoryType.OBSERVATION,
-        content="test",
-        importance=1.0,
-        decay_rate=0.3,
-        updated_at=datetime.now() - timedelta(days=7),
-    )
-    score = score_memory(mem)
-    expected = math.exp(-0.3 * 7) * 1.0 * 0.8
-    assert abs(score - expected) < 0.01
-
-
-def test_orchestrator_state_defaults():
-    state = OrchestratorState()
-    assert state.session_id is None
-    assert state.is_awake is False
-    assert state.core_briefing == ""
-    assert state.total_messages_handled == 0

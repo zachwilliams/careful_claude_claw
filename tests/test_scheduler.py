@@ -72,7 +72,6 @@ def test_active_agents_crud():
         started_at=datetime.now(UTC),
         status=JobStatus.RUNNING,
     )
-    db_module.insert_execution(ex)
 
     db_module.register_active_agent(ex)
     agents = db_module.list_active_agents()
