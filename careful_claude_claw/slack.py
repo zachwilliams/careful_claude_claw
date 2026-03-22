@@ -127,6 +127,10 @@ async def run_slack_listener() -> None:
 
         user_id = event.get("user", "")
         if allowed_user_id and user_id != allowed_user_id:
+            channel = event.get("channel", "")
+            if channel:
+                slack_bot.reply_channel = channel
+                await slack_bot.send_message("Sorry I am not allowed to talk to you :(")
             return
 
         channel = event.get("channel", "")
