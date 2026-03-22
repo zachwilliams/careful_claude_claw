@@ -355,7 +355,6 @@ class CommandRouter:
             return
 
         name = generate_name("S")
-        await self.bot.send_message(f"@{name}: Starting skill `{skill_name}`...")
         reply_fn = self.bot.get_reply_fn()
 
         async def on_message(msg: str) -> None:
@@ -393,7 +392,6 @@ class CommandRouter:
     async def _spawn_agent(self, text: str, memory_context: str = "") -> None:
         """Spawn a background agent for free-text tasks."""
         name = generate_name("T")
-        await self.bot.send_message(f"@{name}: Starting...")
         reply_fn = self.bot.get_reply_fn()
 
         system_prompt = self.orchestrator.build_system_prompt(
@@ -499,7 +497,6 @@ class CommandRouter:
         """Spawn a new agent and deliver a file to it."""
         task_text = caption or f"Process this {media_type} file: {file_name}"
         name = generate_name("T")
-        await self.bot.send_message(f"@{name}: Starting with file...")
         reply_fn = self.bot.get_reply_fn()
 
         async def on_message(msg: str) -> None:

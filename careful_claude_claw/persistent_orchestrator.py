@@ -184,8 +184,6 @@ class PersistentOrchestrator:
         """Entry point for all interfaces. Auto-wakes if asleep."""
         if not self._state.is_awake:
             await self.wake()
-        if self._processing:
-            await callback("hmmmmm...")
         await self._queue.put(PendingMessage(text=text, source=source, callback=callback))
 
     async def _message_pump(self) -> None:

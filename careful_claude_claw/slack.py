@@ -40,6 +40,9 @@ class SlackBot(BotClient):
         self.reply_thread_ts: str = ""
         # (channel_id, thread_ts) pairs where the bot is participating.
         self.active_threads: set[tuple[str, str]] = set()
+        # Channel/ts of the thinking reaction to remove on first reply.
+        self._thinking_channel: str = ""
+        self._thinking_ts: str = ""
 
     @property
     def platform(self) -> str:
@@ -48,16 +51,30 @@ class SlackBot(BotClient):
     async def close(self) -> None:
         await self._http.aclose()
 
+    async def _clear_thinking_reaction(self) -> None:
+        """Remove the thinking reaction from the triggering message, if set."""
+        if not self._thinking_ts:
+            return
+        channel, ts = self._thinking_channel, self._thinking_ts
+        self._thinking_channel = ""
+        self._thinking_ts = ""
+        try:
+            await self._app.client.reactions_remove(channel=channel, timestamp=ts, name="thinking_face")
+        except Exception:
+            logger.debug("Could not remove thinking reaction")
+
     def get_reply_fn(self) -> Callable[[str], Awaitable[None]]:
         """Snapshot the current reply context so background agents reply to the right place."""
         channel = self.reply_channel
         thread_ts = self.reply_thread_ts
         app = self._app
+        bot = self
 
         async def _send(text: str) -> None:
             if not channel:
                 logger.warning("get_reply_fn: no channel captured")
                 return
+            await bot._clear_thinking_reaction()
             chunks = split_message(text, max_len=SLACK_MESSAGE_MAX_LEN)
             for chunk in chunks:
                 try:
@@ -75,6 +92,7 @@ class SlackBot(BotClient):
         if not self.reply_channel:
             logger.warning("send_message called with no reply_channel set")
             return
+        await self._clear_thinking_reaction()
         chunks = split_message(text, max_len=SLACK_MESSAGE_MAX_LEN)
         for chunk in chunks:
             try:
@@ -203,22 +221,18 @@ async def run_slack_listener() -> None:
                 await app.client.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
             except Exception:
                 logger.debug("Could not add thinking reaction")
-            try:
-                for f in files:
-                    file_id = f.get("id", "")
-                    file_name = f.get("name", "file")
-                    media_type = f.get("filetype", "document")
-                    logger.info("Received Slack file: %s (%s)", file_name, media_type)
-                    try:
-                        await router.handle_file_message(file_id, file_name, media_type, text)
-                    except Exception:
-                        logger.exception("Error handling Slack file message")
-                        await slack_bot.send_message("Error processing your file.")
-            finally:
+            slack_bot._thinking_channel = channel
+            slack_bot._thinking_ts = msg_ts
+            for f in files:
+                file_id = f.get("id", "")
+                file_name = f.get("name", "file")
+                media_type = f.get("filetype", "document")
+                logger.info("Received Slack file: %s (%s)", file_name, media_type)
                 try:
-                    await app.client.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
+                    await router.handle_file_message(file_id, file_name, media_type, text)
                 except Exception:
-                    logger.debug("Could not remove thinking reaction")
+                    logger.exception("Error handling Slack file message")
+                    await slack_bot.send_message("Error processing your file.")
             return
 
         if not text:
@@ -229,16 +243,13 @@ async def run_slack_listener() -> None:
             await app.client.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
         except Exception:
             logger.debug("Could not add thinking reaction")
+        slack_bot._thinking_channel = channel
+        slack_bot._thinking_ts = msg_ts
         try:
             await router.handle_message(text)
         except Exception:
             logger.exception("Error handling Slack message: %s", text[:100])
             await slack_bot.send_message("Error processing your message.")
-        finally:
-            try:
-                await app.client.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
-            except Exception:
-                logger.debug("Could not remove thinking reaction")
 
     @app.event("app_mention")
     async def handle_mention(event: dict, say: object) -> None:  # noqa: ARG001
@@ -249,10 +260,15 @@ async def run_slack_listener() -> None:
     async def handle_channel_thread_reply(event: dict, say: object) -> None:  # noqa: ARG001
         """Handle thread replies in channels where the bot is already participating."""
         thread_ts = event.get("thread_ts")
+        channel = event.get("channel", "")
+        logger.debug(
+            "message event: channel=%s thread_ts=%s active_threads=%s",
+            channel, thread_ts, slack_bot.active_threads,
+        )
         if not thread_ts:
             return
-        channel = event.get("channel", "")
         if (channel, thread_ts) not in slack_bot.active_threads:
+            logger.debug("Thread (%s, %s) not in active_threads — ignoring", channel, thread_ts)
             return
         await _route_event(event)
 
