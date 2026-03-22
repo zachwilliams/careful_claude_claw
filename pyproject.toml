@@ -45,6 +45,7 @@ packages = ["careful_claude_claw"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = ["integration: requires live Claude CLI"]
+addopts = "-m 'not integration'"
 
 [tool.ruff]
 line-length = 100
