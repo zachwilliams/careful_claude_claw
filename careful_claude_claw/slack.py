@@ -199,16 +199,26 @@ async def run_slack_listener() -> None:
         # Handle file shares
         files = event.get("files", [])
         if files:
-            for f in files:
-                file_id = f.get("id", "")
-                file_name = f.get("name", "file")
-                media_type = f.get("filetype", "document")
-                logger.info("Received Slack file: %s (%s)", file_name, media_type)
+            try:
+                await app.client.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
+            except Exception:
+                logger.debug("Could not add thinking reaction")
+            try:
+                for f in files:
+                    file_id = f.get("id", "")
+                    file_name = f.get("name", "file")
+                    media_type = f.get("filetype", "document")
+                    logger.info("Received Slack file: %s (%s)", file_name, media_type)
+                    try:
+                        await router.handle_file_message(file_id, file_name, media_type, text)
+                    except Exception:
+                        logger.exception("Error handling Slack file message")
+                        await slack_bot.send_message("Error processing your file.")
+            finally:
                 try:
-                    await router.handle_file_message(file_id, file_name, media_type, text)
+                    await app.client.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
                 except Exception:
-                    logger.exception("Error handling Slack file message")
-                    await slack_bot.send_message("Error processing your file.")
+                    logger.debug("Could not remove thinking reaction")
             return
 
         if not text:
@@ -216,10 +226,19 @@ async def run_slack_listener() -> None:
 
         logger.info("Received Slack message from %s: %s", user_id, text[:100])
         try:
+            await app.client.reactions_add(channel=channel, timestamp=msg_ts, name="thinking_face")
+        except Exception:
+            logger.debug("Could not add thinking reaction")
+        try:
             await router.handle_message(text)
         except Exception:
             logger.exception("Error handling Slack message: %s", text[:100])
             await slack_bot.send_message("Error processing your message.")
+        finally:
+            try:
+                await app.client.reactions_remove(channel=channel, timestamp=msg_ts, name="thinking_face")
+            except Exception:
+                logger.debug("Could not remove thinking reaction")
 
     @app.event("app_mention")
     async def handle_mention(event: dict, say: object) -> None:  # noqa: ARG001
