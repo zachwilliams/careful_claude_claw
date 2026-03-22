@@ -36,6 +36,10 @@ class SlackBot(BotClient):
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
         # Set before each message is routed; replies go back to this channel.
         self.reply_channel: str = ""
+        # Thread timestamp for the current message; bot replies into this thread.
+        self.reply_thread_ts: str = ""
+        # (channel_id, thread_ts) pairs where the bot is participating.
+        self.active_threads: set[tuple[str, str]] = set()
 
     @property
     def platform(self) -> str:
@@ -45,8 +49,9 @@ class SlackBot(BotClient):
         await self._http.aclose()
 
     def get_reply_fn(self) -> Callable[[str], Awaitable[None]]:
-        """Snapshot the current reply_channel so background agents reply to the right place."""
+        """Snapshot the current reply context so background agents reply to the right place."""
         channel = self.reply_channel
+        thread_ts = self.reply_thread_ts
         app = self._app
 
         async def _send(text: str) -> None:
@@ -56,11 +61,10 @@ class SlackBot(BotClient):
             chunks = split_message(text, max_len=SLACK_MESSAGE_MAX_LEN)
             for chunk in chunks:
                 try:
-                    await app.client.chat_postMessage(
-                        channel=channel,
-                        text=chunk,
-                        mrkdwn=True,
-                    )
+                    kwargs: dict = {"channel": channel, "text": chunk, "mrkdwn": True}
+                    if thread_ts:
+                        kwargs["thread_ts"] = thread_ts
+                    await app.client.chat_postMessage(**kwargs)
                 except Exception:
                     logger.exception("Failed to send Slack message")
 
@@ -74,11 +78,14 @@ class SlackBot(BotClient):
         chunks = split_message(text, max_len=SLACK_MESSAGE_MAX_LEN)
         for chunk in chunks:
             try:
-                await self._app.client.chat_postMessage(
-                    channel=self.reply_channel,
-                    text=chunk,
-                    mrkdwn=True,
-                )
+                kwargs: dict = {
+                    "channel": self.reply_channel,
+                    "text": chunk,
+                    "mrkdwn": True,
+                }
+                if self.reply_thread_ts:
+                    kwargs["thread_ts"] = self.reply_thread_ts
+                await self._app.client.chat_postMessage(**kwargs)
             except Exception:
                 logger.exception("Failed to send Slack message")
 
@@ -192,6 +199,13 @@ async def run_slack_listener() -> None:
             return
 
         slack_bot.reply_channel = channel
+        # Reply in the same thread; if the message is already in a thread use
+        # its thread_ts, otherwise use the message's own ts to start one.
+        msg_ts = event.get("ts", "")
+        slack_bot.reply_thread_ts = event.get("thread_ts") or msg_ts
+        # Remember this thread so we can pick up future replies without @mention.
+        if slack_bot.reply_thread_ts:
+            slack_bot.active_threads.add((channel, slack_bot.reply_thread_ts))
 
         text = (event.get("text") or "").strip()
         # Strip bot @mention prefix (present in app_mention events)
@@ -233,6 +247,20 @@ async def run_slack_listener() -> None:
     @app.event("app_mention")
     async def handle_mention(event: dict, say: object) -> None:  # noqa: ARG001
         """Handle @mentions of the bot in any channel."""
+        await _route_event(event)
+
+    @app.event("message")
+    async def handle_channel_thread_reply(event: dict, say: object) -> None:  # noqa: ARG001
+        """Handle thread replies in channels where the bot is already participating."""
+        # DMs are handled by handle_dm above.
+        if event.get("channel_type") == "im":
+            return
+        thread_ts = event.get("thread_ts")
+        if not thread_ts:
+            return
+        channel = event.get("channel", "")
+        if (channel, thread_ts) not in slack_bot.active_threads:
+            return
         await _route_event(event)
 
     handler = AsyncSocketModeHandler(app, app_token)
