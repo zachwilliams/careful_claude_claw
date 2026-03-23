@@ -116,7 +116,7 @@ class PersistentOrchestrator:
             allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "mcp__*"],
             max_turns=25,
             permission_mode="bypassPermissions",
-            setting_sources=[],
+            setting_sources=["user"],
             system_prompt=system_prompt,
             mcp_servers={"claw_orchestrator": self._mcp_server},
         )

@@ -15,6 +15,9 @@ set -euo pipefail
 
 CLAW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+LAUNCHD_LABEL="com.carefulclaudeclaw.claw"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+
 # Source local environment overrides (gitignored)
 if [[ -f "$CLAW_DIR/.env" ]]; then
     set -a
@@ -137,6 +140,62 @@ cmd_dev_reset() {
     cmd_start
 }
 
+cmd_install() {
+    local wrapper="$CLAW_DIR/bin/claw-launchd-wrapper"
+
+    if [[ -f "$LAUNCHD_PLIST" ]]; then
+        echo "launchd service already installed at $LAUNCHD_PLIST"
+        echo "Run 'claw-services uninstall' first to reinstall."
+        return
+    fi
+
+    mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
+
+    cat > "$LAUNCHD_PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${wrapper}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${CLAW_DIR}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/claw.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/claw.log</string>
+</dict>
+</plist>
+EOF
+
+    launchctl load "$LAUNCHD_PLIST"
+    echo "  [ok] launchd service installed and started"
+    echo "       plist: $LAUNCHD_PLIST"
+    echo "       logs:  $LOG_DIR/claw.log"
+    echo
+    echo "The service will start automatically at login and restart on crash."
+    echo "caffeinate keeps the machine awake while the bot is running."
+}
+
+cmd_uninstall() {
+    if [[ ! -f "$LAUNCHD_PLIST" ]]; then
+        echo "launchd service not installed."
+        return
+    fi
+
+    launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
+    rm -f "$LAUNCHD_PLIST"
+    echo "  [ok] launchd service uninstalled"
+}
+
 cmd_logs() {
     local files=()
     [[ -f "$LOG_DIR/claw.log" ]] && files+=("$LOG_DIR/claw.log")
@@ -158,8 +217,10 @@ case "${1:-}" in
     dev-reset) cmd_dev_reset ;;
     status)    cmd_status ;;
     logs)      cmd_logs ;;
+    install)   cmd_install ;;
+    uninstall) cmd_uninstall ;;
     *)
-        echo "Usage: claw-services {start|stop|restart|dev-reset|status|logs}"
+        echo "Usage: claw-services {start|stop|restart|dev-reset|status|logs|install|uninstall}"
         exit 1
         ;;
 esac
