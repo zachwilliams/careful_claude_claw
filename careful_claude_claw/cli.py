@@ -450,32 +450,33 @@ def status() -> None:
 
 @cli.command()
 @click.option(
-    "--telegram/--no-telegram",
+    "--slack/--no-slack",
     default=None,
-    help="Enable/disable Telegram listener (auto-detects from config).",
+    help="Enable/disable Slack listener (auto-detects from config).",
 )
-def start(telegram: bool | None) -> None:
-    """Start the scheduler daemon (optionally with Telegram listener)."""
+def start(slack: bool | None) -> None:
+    """Start the scheduler daemon (optionally with Slack listener)."""
     init_db()
 
     import logging
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
+    from .config import settings
     from .scheduler import run_scheduler
-    from .telegram import load_telegram_config, run_telegram_listener
+    from .slack import run_slack_listener
 
-    # Auto-detect Telegram if not explicitly set
-    tg_enabled = telegram if telegram is not None else load_telegram_config() is not None
+    # Auto-detect Slack if not explicitly set
+    slack_enabled = slack if slack is not None else settings.slack_configured
 
     async def _run_all() -> None:
         tasks = [run_scheduler()]
-        if tg_enabled:
-            tasks.append(run_telegram_listener())
+        if slack_enabled:
+            tasks.append(run_slack_listener())
         await asyncio.gather(*tasks)
 
-    if tg_enabled:
-        console.print("[bold cyan]Starting scheduler + Telegram listener...[/bold cyan]")
+    if slack_enabled:
+        console.print("[bold cyan]Starting scheduler + Slack listener...[/bold cyan]")
     else:
         console.print("[bold cyan]Starting scheduler...[/bold cyan]")
 
@@ -485,28 +486,29 @@ def start(telegram: bool | None) -> None:
         console.print("\n[dim]Stopped.[/dim]")
 
 
-# --- Telegram ---
+# --- Slack ---
 
 
 @cli.command()
-def telegram() -> None:
-    """Start the Telegram listener (standalone, for dev/testing)."""
+def slack() -> None:
+    """Start the Slack listener (standalone, for dev/testing)."""
     init_db()
 
     import logging
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-    from .telegram import load_telegram_config, run_telegram_listener
+    from .config import settings
+    from .slack import run_slack_listener
 
-    if not load_telegram_config():
-        console.print("[red]Telegram not configured.[/red]")
-        console.print("[dim]Add botToken and chatId to ~/.mcp-telegram/config.json[/dim]")
+    if not settings.slack_configured:
+        console.print("[red]Slack not configured.[/red]")
+        console.print("[dim]Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env[/dim]")
         return
 
-    console.print("[bold cyan]Starting Telegram listener...[/bold cyan]")
+    console.print("[bold cyan]Starting Slack listener...[/bold cyan]")
     try:
-        asyncio.run(run_telegram_listener())
+        asyncio.run(run_slack_listener())
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
 
@@ -623,27 +625,13 @@ def wake_cmd() -> None:
 # --- Reset (dev) ---
 
 
-async def _clear_telegram(token: str, chat_id: int) -> int:
-    """Clear all reachable messages in the Telegram chat."""
-    from .telegram import TelegramBot
-
-    bot = TelegramBot(token, chat_id)
-    try:
-        probe_id = await bot.send_and_get_id("Resetting...")
-        if not probe_id:
-            return 0
-        return await bot.delete_all_messages(probe_id)
-    finally:
-        await bot.close()
-
-
 @cli.command()
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 def reset(yes: bool) -> None:
-    """[Dev] Wipe all data: kill agents, clear SQLite DB, and delete Telegram messages."""
+    """[Dev] Wipe all data: kill agents and clear SQLite DB."""
     if not yes:
         click.confirm(
-            "This will DELETE all database data and Telegram messages. Continue?",
+            "This will DELETE all database data. Continue?",
             abort=True,
         )
 
@@ -657,17 +645,6 @@ def reset(yes: bool) -> None:
     # Wipe database
     init_db()
     console.print("[green]Database reset.[/green]")
-
-    # Clear Telegram messages
-    from .telegram import load_telegram_config
-
-    config = load_telegram_config()
-    if not config:
-        console.print("[yellow]Telegram not configured, skipping message cleanup.[/yellow]")
-    else:
-        token, chat_id = config
-        deleted = asyncio.run(_clear_telegram(token, chat_id))
-        console.print(f"[green]Deleted {deleted} Telegram message(s).[/green]")
 
     console.print("[bold green]Reset complete.[/bold green]")
 

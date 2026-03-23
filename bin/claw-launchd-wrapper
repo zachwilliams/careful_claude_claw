@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Wrapper script called by the launchd service.
+# Sources .env so secrets are available, then runs the bot under caffeinate
+# to prevent macOS idle sleep while the service is running.
+
+set -euo pipefail
+
+CLAW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ -f "$CLAW_DIR/.env" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$CLAW_DIR/.env"
+    set +a
+fi
+
+exec /usr/bin/caffeinate -i uv run --project "$CLAW_DIR" claw start --slack

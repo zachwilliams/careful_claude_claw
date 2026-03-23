@@ -116,7 +116,7 @@ class PersistentOrchestrator:
             allowed_tools=["Read", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "mcp__*"],
             max_turns=25,
             permission_mode="bypassPermissions",
-            setting_sources=[],
+            setting_sources=["user"],
             system_prompt=system_prompt,
             mcp_servers={"claw_orchestrator": self._mcp_server},
         )
@@ -184,8 +184,6 @@ class PersistentOrchestrator:
         """Entry point for all interfaces. Auto-wakes if asleep."""
         if not self._state.is_awake:
             await self.wake()
-        if self._processing:
-            await callback("hmmmmm...")
         await self._queue.put(PendingMessage(text=text, source=source, callback=callback))
 
     async def _message_pump(self) -> None:
@@ -193,7 +191,9 @@ class PersistentOrchestrator:
         while True:
             try:
                 pending = await self._queue.get()
-                logger.info("Pump: dequeued message from %s: %s", pending.source, pending.text[:100])
+                logger.info(
+                    "Pump: dequeued message from %s: %s", pending.source, pending.text[:100]
+                )
                 set_message_callback(pending.callback)
 
                 self._processing = True

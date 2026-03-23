@@ -26,4 +26,3 @@ htmlcov/
 
 # MCP config (may contain credentials)
 .mcp.json
-
