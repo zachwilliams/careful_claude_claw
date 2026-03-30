@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -38,8 +39,6 @@ async def _run_scheduled_task(
         skill = get_skill(skill_name)
         if skill and skill.file_path:
             try:
-                from pathlib import Path
-
                 effective_task = Path(skill.file_path).read_text()
             except OSError:
                 logger.warning("Could not read skill file %s, using task string", skill.file_path)

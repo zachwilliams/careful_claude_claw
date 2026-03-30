@@ -1,5 +1,7 @@
 import asyncio
+import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 import click
 from rich.console import Console
@@ -71,7 +73,6 @@ def run(
         if not s:
             console.print(f"[red]Skill not found: {skill}[/red]")
             return
-        from pathlib import Path
 
         try:
             task = Path(s.file_path).read_text()
@@ -458,8 +459,6 @@ def start(slack: bool | None) -> None:
     """Start the scheduler daemon (optionally with Slack listener)."""
     init_db()
 
-    import logging
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     from .config import settings
@@ -494,8 +493,6 @@ def slack() -> None:
     """Start the Slack listener (standalone, for dev/testing)."""
     init_db()
 
-    import logging
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     from .config import settings
@@ -521,8 +518,6 @@ def slack() -> None:
 def chat(cwd: str | None) -> None:
     """Start an interactive chat session with the persistent orchestrator."""
     init_db()
-
-    import logging
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -572,8 +567,6 @@ def sleep_cmd() -> None:
     """Put the orchestrator to sleep (consolidate memories and disconnect)."""
     init_db()
 
-    import logging
-
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     from .db import get_orchestrator_state
@@ -599,8 +592,6 @@ def sleep_cmd() -> None:
 def wake_cmd() -> None:
     """Wake the orchestrator (connect and load memories)."""
     init_db()
-
-    import logging
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 

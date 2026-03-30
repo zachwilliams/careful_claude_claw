@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -395,8 +396,6 @@ def _fts_query(query: str) -> str:
     Strips special characters, appends '*' to each word so 'database'
     matches 'databases'. Uses OR so any matching term returns results.
     """
-    import re
-
     # Strip FTS5 special characters
     cleaned = re.sub(r"[^\w\s]", "", query)
     words = cleaned.strip().split()

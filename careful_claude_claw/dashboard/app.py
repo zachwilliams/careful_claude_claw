@@ -21,8 +21,10 @@ Layout:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import shlex
 import sys
 import termios
 import tty
@@ -35,6 +37,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, RichLog, Static, Tree
 
@@ -103,8 +106,6 @@ class WhichKeyScreen(ModalScreen[str | None]):
 
     def on_key(self, event: object) -> None:
         """Capture any key press and return it."""
-        from textual.events import Key  # local import to avoid circular
-
         if isinstance(event, Key):
             event.stop()
             if event.key == "escape":
@@ -319,7 +320,6 @@ class DashboardApp(App[None]):
     # ------------------------------------------------------------------
 
     async def on_mount(self) -> None:
-        import logging
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
         init_db()
@@ -360,8 +360,6 @@ class DashboardApp(App[None]):
 
     async def _spawn_orchestrator(self) -> None:
         """Spawn the orchestrator_miao session as a TOP_LEVEL PTY agent."""
-        import json
-
         ORCHESTRATOR_MIAO_DIR.mkdir(parents=True, exist_ok=True)
 
         # Write CLAUDE.md on first run so the orchestrator has its instructions.
@@ -572,8 +570,6 @@ class DashboardApp(App[None]):
     # ------------------------------------------------------------------
 
     def on_key(self, event: object) -> None:
-        from textual.events import Key  # local import
-
         if not isinstance(event, Key):
             return
 
@@ -770,8 +766,6 @@ class DashboardApp(App[None]):
     # ------------------------------------------------------------------
 
     def _handle_pty_passthrough(self, event: object) -> None:
-        from textual.events import Key
-
         if not isinstance(event, Key):
             return
 
@@ -824,8 +818,6 @@ class DashboardApp(App[None]):
         session_id: SessionID = f"session-{uuid4().hex[:8]}"
 
         # Parse the command string into a list.
-        import shlex
-
         try:
             cmd = shlex.split(cmd_str)
         except ValueError:

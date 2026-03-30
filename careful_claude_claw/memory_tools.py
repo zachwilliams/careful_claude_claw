@@ -7,6 +7,7 @@ using the Claude Agent SDK's in-process MCP server.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -278,8 +279,6 @@ async def spawn_agent_tool(params: dict[str, Any]) -> dict[str, Any]:
 
         # Resolve skill if provided
         if skill_name:
-            from pathlib import Path
-
             skill = None
             for s in discover_skills():
                 if s.name == skill_name:
