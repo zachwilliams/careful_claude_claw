@@ -81,6 +81,7 @@ class PTYSession:
     pty_name: str               # e.g. /dev/pts/3 — used for crash recovery
     cmd: list[str]
     started_at: datetime
+    cwd: str = ""               # working directory the process was spawned in
     output_buffer: bytearray = field(default_factory=bytearray)  # rolling tail buffer
     output_buffer_max: int = 500_000                              # ~500 KB cap
 
@@ -204,7 +205,7 @@ class PTYManagerProtocol(Protocol):
     async def __aexit__(self, *args: object) -> None:
         ...
 
-    def spawn(self, cmd: list[str], session_id: SessionID, name: str, task: str) -> PTYSession:
+    def spawn(self, cmd: list[str], session_id: SessionID, name: str, task: str, cwd: str | None = None) -> PTYSession:
         """Spawn a new PTY process. Raises if session_id already exists."""
         ...
 

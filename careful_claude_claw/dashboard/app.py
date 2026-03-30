@@ -5,27 +5,29 @@ Wires PTYManager, AgentRegistry, and TokenTracker into a live terminal UI.
 
 Layout:
   ┌─────────────────┬────────────────────────────────┐
-  │  Agent Roster   │  PTY Output (tabbed)            │
-  │  (Tree)         │  [Agent A] [Agent B] ...        │
-  │                 │                                  │
-  │  ▶ orchestrator │  (terminal output for selected) │
-  │    sub-agent-1  │                                  │
-  │  ○ ext-agent    │                                  │
+  │  Agent Roster   │  PTY Output (tabbed)           │
+  │  (Tree)         │  [Agent A] [Agent B] ...       │
+  │                 │                                │
+  │  ▶ orchestrator │ (terminal output for selected) │
+  │    sub-agent-1  │                                │
+  │  ○ ext-agent    │                                │
   ├─────────────────┴────────────────────────────────┤
   │  Detail strip: name, status, pid, context_pct    │
-  ├───────────────────────────────────────────────────┤
-  │  Footer: tokens (1hr): 45,231  ~estimate          │
-  └───────────────────────────────────────────────────┘
+  ├──────────────────────────────────────────────────┤
+  │  Footer: tokens (1hr): 45,231  ~estimate         │
+  └──────────────────────────────────────────────────┘
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import termios
 import tty
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 from rich.text import Text
@@ -37,6 +39,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, RichLog, Static, Tree
 
 from careful_claude_claw.db import init_db
+from careful_claude_claw.paths import CLAW_DIR, ORCHESTRATOR_MIAO_DIR
 
 from .agent_registry import AgentRegistry
 from .interfaces import (
@@ -162,6 +165,40 @@ class NewAgentScreen(ModalScreen[str | None]):
 # ---------------------------------------------------------------------------
 # Main dashboard application
 # ---------------------------------------------------------------------------
+
+_ORCHESTRATOR_CLAUDE_MD = """\
+# Miao — Persistent Orchestrator
+
+You are 小火苗 (Miao), a persistent AI assistant with memory and sub-agent capabilities.
+
+## Session Start
+At the start of each session, recall relevant context:
+```
+memory_search("recent interactions preferences active projects")
+```
+
+## Memory
+- `memory_write` — store preferences, decisions, observations, procedures
+- `memory_search` — recall relevant context before responding
+- `memory_update` — revise outdated memories
+- `memory_list` — browse all stored memories
+
+Types: `preference` (permanent), `decision` (slow decay), `observation` (weeks), `procedure` (permanent)
+
+## Sub-agents
+Spawn sub-agents for coding tasks, file work, or parallelisable jobs:
+- `spawn_agent` — dispatch a task
+- `list_agents` — check running agents
+- `kill_agent` — stop an agent
+- `send_to_agent` — send a follow-up
+
+## System
+- `list_jobs` — configured scheduled jobs
+- `list_skills` — available skills
+
+## Style
+Be concise. Spawn sub-agents for substantial coding or file tasks. Ask when scope is unclear.
+"""
 
 
 class DashboardApp(App[None]):
@@ -289,6 +326,11 @@ class DashboardApp(App[None]):
         await self.pty_manager.start()
         await self.registry.reconcile_with_db()
 
+        try:
+            await self._spawn_orchestrator()
+        except Exception:
+            logging.getLogger(__name__).warning("Orchestrator PTY spawn failed", exc_info=True)
+
         if self._start_scheduler:
             from careful_claude_claw.scheduler import run_scheduler
             self._scheduler_task = asyncio.get_running_loop().create_task(
@@ -298,6 +340,7 @@ class DashboardApp(App[None]):
         self._refresh_roster()
         self.set_interval(2.0, self._poll_subagents)
         self.set_interval(2.0, self._refresh_roster)
+        self.set_interval(5.0, self._reconcile_external)
         self.set_interval(30.0, self._refresh_token_bar)
         self._refresh_token_bar()
 
@@ -309,6 +352,64 @@ class DashboardApp(App[None]):
             except asyncio.CancelledError:
                 pass
         await self.pty_manager.close()
+
+    async def _reconcile_external(self) -> None:
+        """Periodic task: sync EXTERNAL agents from SQLite active_agents into the registry."""
+        await self.registry.reconcile_with_db()
+        self._refresh_roster()
+
+    async def _spawn_orchestrator(self) -> None:
+        """Spawn the orchestrator_miao session as a TOP_LEVEL PTY agent."""
+        import json
+
+        ORCHESTRATOR_MIAO_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Write CLAUDE.md on first run so the orchestrator has its instructions.
+        claude_md = ORCHESTRATOR_MIAO_DIR / "CLAUDE.md"
+        if not claude_md.exists():
+            claude_md.write_text(_ORCHESTRATOR_CLAUDE_MD)
+
+        # Locate the project root (where pyproject.toml lives) for the MCP server cwd.
+        import careful_claude_claw
+        project_root = Path(careful_claude_claw.__file__).parent.parent
+        mcp_config_path = CLAW_DIR / "mcp_orchestrator.json"
+        mcp_config = {
+            "mcpServers": {
+                "claw_orchestrator": {
+                    "command": "uv",
+                    "args": ["run", "python", "-m", "careful_claude_claw.mcp_server"],
+                    "cwd": str(project_root),
+                }
+            }
+        }
+        mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
+
+        cmd = [
+            "claude",
+            "--continue",
+            "--mcp-config", str(mcp_config_path),
+            "--allowedTools", "Read,Glob,Grep,Bash,WebSearch,WebFetch,mcp__claw_orchestrator__*",
+            "--permission-mode", "bypassPermissions",
+        ]
+
+        session_id: SessionID = "orchestrator_miao"
+        pty_session = self.pty_manager.spawn(
+            cmd,
+            session_id,
+            "Miao (orchestrator)",
+            "Persistent orchestrator",
+            cwd=str(ORCHESTRATOR_MIAO_DIR),
+        )
+        self.registry.register(AgentState(
+            session_id=session_id,
+            kind=AgentKind.TOP_LEVEL,
+            pid=pty_session.pid,
+            name="Miao (orchestrator)",
+            task="Persistent orchestrator",
+            status=AgentStatus.ACTIVE,
+            started_at=datetime.now(UTC),
+            last_output_at=None,
+        ))
 
     # ------------------------------------------------------------------
     # Roster management

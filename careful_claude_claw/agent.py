@@ -13,6 +13,7 @@ from claude_agent_sdk import (
 
 from .db import insert_execution, register_active_agent, unregister_active_agent, update_execution
 from .models import Execution, JobStatus
+from .paths import JOBS_DIR
 
 DEFAULT_TASK = "List all the active MCP connections you have."
 
@@ -31,9 +32,9 @@ async def run_agent(
     allowed_tools: list[str] | None = None,
 ) -> Execution:
     """Spawn a Claude agent for the given task, with retry on failure."""
-    is_temp = cwd is None
-    workspace = Path(cwd) if cwd else Path.cwd() / "workspace"
+    workspace = Path(cwd) if cwd else JOBS_DIR / job_name
     workspace.mkdir(parents=True, exist_ok=True)
+    is_temp = False  # job workspaces are persistent; history carries between runs
     cwd = str(workspace)
 
     execution = Execution(

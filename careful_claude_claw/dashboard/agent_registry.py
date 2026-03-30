@@ -217,6 +217,20 @@ class AgentRegistry:
         """
         rows = db_module.list_active_agents()
 
+        # Remove EXTERNAL agents that are DB-backed (have execution_id) but no longer in DB.
+        current_execution_ids = {row["execution_id"] for row in rows}
+        async with self._lock:
+            stale = [
+                sid
+                for sid, agent in self._agents.items()
+                if agent.kind == AgentKind.EXTERNAL
+                and agent.execution_id is not None
+                and agent.execution_id not in current_execution_ids
+            ]
+            for sid in stale:
+                del self._agents[sid]
+                logger.debug("reconcile_with_db: removed stale external agent %s", sid)
+
         registered = 0
         skipped = 0
 

@@ -17,60 +17,70 @@ A security-first Python platform for managing Claude Code agents across messagin
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                  Interfaces                      │
-│  ┌──────────┐   ┌───────────┐  ┌──────────────┐  │
-│  │ CLI      │   │ Telegram  │  │ Scheduler    │  │
-│  │ (click)  │   │ (polling) │  │ (APScheduler)│  │
-│  └────┬─────┘   └─────┬─────┘  └──────┬───────┘  │
-│       └───────────────┼───────────────┘          │
-│                       ▼                          │
-│  ┌────────────────────────────────────────────┐  │
-│  │            Security Layer                  │  │
-│  │  security.yaml → allowed_tools             │  │
-│  │                + system_prompt policies    │  │
-│  │                + hooks (future)            │  │
-│  └────────────────────┬───────────────────────┘  │
-│                       ▼                          │
-│  ┌────────────────────────────────────────────┐  │
-│  │            Agent Layer                     │  │
-│  │  ┌──────────────┐  ┌───────────────────┐   │  │
-│  │  │ One-shot     │  │ Interactive       │   │  │
-│  │  │ (query)      │  │ (ClaudeSDKClient) │   │  │
-│  │  │ + retry      │  │ + session mgmt    │   │  │
-│  │  └──────────────┘  └───────────────────┘   │  │
-│  └────────────────────────────────────────────┘  │
-│                       │                          │
-│  ┌────────────────────┼───────────────────────┐  │
-│  │            Entity Layer                    │  │
-│  │  Projects · Skills · Schedules · Jobs      │  │
-│  └────────────────────────────────────────────┘  │
-│                       │                          │
-│               ┌───────┴───────┐                  │
-│               │    SQLite     │                  │
-│               └───────────────┘                  │
-└──────────────────────────────────────────────────┘
-                        │
-                ┌───────┴───────┐
-                │  Claude Code  │
-                │  (CLI / SDK)  │
-                └───────────────┘
+┌───────────────────────────────────────────────────────────┐
+│                      Interfaces                           │
+│  ┌──────────┐  ┌───────────┐  ┌──────────────┐  ┌──────┐ │
+│  │ Dashboard│  │ Telegram  │  │ Scheduler    │  │ CLI  │ │
+│  │ (Textual)│  │ (polling) │  │ (APScheduler)│  │      │ │
+│  └────┬─────┘  └─────┬─────┘  └──────┬───────┘  └──┬───┘ │
+│       │              └───────────────┼──────────────┘     │
+│       │ PTY                          │ SDK                │
+│       ▼                              ▼                    │
+│  ┌──────────────┐     ┌───────────────────────────────┐   │
+│  │ PTYManager   │     │       Security Layer          │   │
+│  │ AgentRegistry│     │  security.yaml → allowed_tools│   │
+│  │ TokenTracker │     │              + policies       │   │
+│  └──────┬───────┘     └──────────────┬────────────────┘   │
+│         │                            ▼                    │
+│         │             ┌─────────────────────────────┐     │
+│         │             │         Agent Layer         │     │
+│         │             │  ┌───────────┐  ┌────────┐  │     │
+│         │             │  │ One-shot  │  │ Inter- │  │     │
+│         │             │  │ (query)   │  │ active │  │     │
+│         │             │  └───────────┘  └────────┘  │     │
+│         │             └─────────────────────────────┘     │
+│         │                            │                    │
+│  ┌──────┴────────────────────────────┼─────────────────┐  │
+│  │                   Entity Layer                      │  │
+│  │       Skills · Schedules · Jobs · Memories          │  │
+│  └────────────────────────────────────────────────────-┘  │
+│                              │                            │
+│                      ┌───────┴───────┐                    │
+│                      │  SQLite       │                    │
+│                      │  (~/.claw/ or │                    │
+│                      │   ./claw.db)  │                    │
+│                      └───────────────┘                    │
+└───────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┴────────────────┐
+              │          Claude Code           │
+              │  PTY (orchestrator_miao)       │
+              │  SDK (jobs, sdk_sessions)      │
+              │  MCP stdio (claw_orchestrator) │
+              └────────────────────────────────┘
 ```
 
 ### Interfaces
 
-Three ways to trigger agent execution:
+Four ways to trigger agent execution:
 
+- **Dashboard** (`claw dashboard`) — Textual TUI that spawns `orchestrator_miao` as a PTY process and shows live streaming output. Also runs the scheduler in the background. Primary interactive interface.
 - **CLI** (`click`) — `claw run`, `claw status`, `claw schedule`, etc. For local development and admin.
-- **Telegram** — Long-polling bot with command routing (`/status`, `/run`, `/kill`) and free-text agent spawning. Primary remote interface.
+- **Telegram** — Long-polling bot with command routing (`/status`, `/run`, `/kill`) and free-text agent spawning. Routes through `PersistentOrchestrator` for context and memory.
 - **Scheduler** (`APScheduler`) — Cron-based triggers that fire one-shot agent runs on a schedule. Durable across restarts.
 
-### Agent Layer
+### Agent Tiers
 
-Two execution modes, both using the Claude Code Agent SDK:
+Two distinct execution tiers:
 
-- **One-shot** (`agent.py`) — `query()` with retry logic. Fire-and-forget: send task, get result. Used by CLI `claw run` and scheduler.
-- **Interactive** (`agent_session.py`) — `ClaudeSDKClient` with bidirectional messaging. Supports follow-up messages (`/reply`, `@name`), interrupts, and session lifecycle. Used by Telegram for conversational agent interactions.
+**PTY tier** (`dashboard/pty_manager.py`) — `claude` CLI spawned as a subprocess with a real PTY. Full terminal emulation, live output streaming to the dashboard, fullscreen attach support. Used exclusively by the dashboard.
+
+- `orchestrator_miao` — Persistent, interactive orchestrator. Runs in `~/.claw/orchestrator_miao/`. Uses `claude --continue` for session resumption. Equipped with `claw_orchestrator` MCP tools (memory + sub-agent management) via a stdio FastMCP server (`mcp_server.py`).
+
+**SDK tier** (`agent.py`, `agent_session.py`) — Claude Agent SDK (`query()`, `ClaudeSDKClient`). Used by CLI, Telegram, and scheduler. No PTY; programmatic I/O.
+
+- **One-shot** (`agent.py`) — `query()` with retry logic. Fire-and-forget. Workspaces at `~/.claw/jobs/<job-name>/`.
+- **Interactive** (`agent_session.py`) — `ClaudeSDKClient` with bidirectional messaging. Supports follow-ups, interrupts, session lifecycle. Workspaces at `~/.claw/sdk_sessions/<name>/`.
 
 ### Entity Layer
 
@@ -386,39 +396,62 @@ Claude Code includes built-in scheduling features. Understanding the boundary be
 
 ---
 
-### Phase 8: Observability
+### Phase 8: Dashboard ✅
 
-**Goal:** Better visibility into what's running and what happened.
+**Goal:** Live Textual TUI as the primary interactive interface. Orchestrator runs as a PTY agent with visible output and session continuity.
 
-#### 8.1 Enhanced status
+#### 8.1 Dashboard TUI ✅
 
-- [ ] `claw dashboard` — Rich TUI with live-updating active agents, recent jobs, schedule next-fire times
-- [ ] Failure analysis: aggregate failures by agent, time period, error type
+- [x] `claw dashboard` — Textual TUI with live agent roster (Tree) and PTY output (RichLog)
+- [x] Leader-key bindings: kill, hard kill, fullscreen attach, new agent, quit, refresh
+- [x] `WhichKeyScreen` overlay showing available bindings
+- [x] `NewAgentScreen` modal for spawning agents interactively
+- [x] Token usage footer (rolling 1-hour window)
+- [x] Detail strip showing selected agent status, pid, context %
 
-#### 8.2 Alerting
+#### 8.2 PTY infrastructure ✅
 
-- [ ] On final failure (after max retries), send alert via active messaging interface
-- [ ] Configurable in `security.yaml`: `on_final_failure: alert | ignore`
+- [x] `PTYManager` — spawn/stream/kill PTY subprocesses; non-blocking `loop.add_reader`; ring-buffer output (500KB cap); fan-out to per-consumer queues
+- [x] `AgentRegistry` — in-memory state store; TOP_LEVEL / EXTERNAL / SUB_AGENT tiers; periodic DB reconciliation for externally-spawned agents; psutil-based sub-agent detection
+- [x] `TokenTracker` — stateful ANSI-stripped brace-counting parser; rolling SQLite-backed summaries
+- [x] `interfaces.py` — shared Protocol contracts and dataclasses for all dashboard components
 
-#### 8.3 Hooks-based audit logging (depends on Phase 5)
+#### 8.3 Orchestrator_miao as PTY agent ✅
 
-- [ ] Claude Code hooks for pre/post tool call logging
-- [ ] Audit trail: which tools each agent actually used, not just what was allowed
+- [x] `orchestrator_miao` spawned via PTYManager with `claude --continue` in `~/.claw/orchestrator_miao/`
+- [x] `CLAUDE.md` written to orchestrator dir on first launch (Miao persona + tool instructions)
+- [x] `mcp_server.py` — standalone FastMCP stdio server exposing memory CRUD + sub-agent tools to the PTY-spawned claude process
+- [x] `mcp_orchestrator.json` generated at startup, pointing MCP config at the stdio server
+- [x] Scheduler runs as asyncio background task inside Textual event loop
+
+#### 8.4 Stable workspace layout ✅
+
+- [x] `paths.py` — `~/.claw/` directory constants for all agent types
+- [x] SDK sessions migrated to `~/.claw/sdk_sessions/<name>/`
+- [x] Scheduler jobs default to `~/.claw/jobs/<job-name>/`
+- [x] Persistent workspaces (no temp cleanup); session history enables `--continue`
+
+#### 8.5 Remaining observability work
+
+- [ ] Failure alerting: on final retry failure, send alert via active messaging interface
+- [ ] Hooks-based audit logging (depends on Phase 5): pre/post tool call audit trail
 
 **Files:**
-- Edit: `cli.py`, `agent.py`, `scheduler.py`
-- New: `careful_claude_claw/hooks/` (if hooks integration warrants its own module)
+- New: `careful_claude_claw/dashboard/` (interfaces.py, pty_manager.py, agent_registry.py, token_tracker.py, app.py)
+- New: `careful_claude_claw/mcp_server.py`, `careful_claude_claw/paths.py`
+- Edit: `cli.py` (added `dashboard` command), `agent.py`, `agent_session.py` (workspace paths)
+- New: `tests/test_dashboard_pty_manager.py`, `tests/test_dashboard_agent_registry.py`, `tests/test_dashboard_token_tracker.py`
 
 ---
 
 ## Execution Order
 
-Build sequentially: **Phase 5 → 6 → 7 → 8**. Each phase builds on the previous:
+Remaining phases: **Phase 5 → 6 → 7**, then finish Phase 8 alerting/hooks.
 
-- Phase 5 (security) establishes the policy layer that all interfaces enforce
+- Phase 5 (security) establishes the policy layer that all interfaces enforce — including the dashboard's PTY spawn path
 - Phase 6 (messaging abstraction) enables multi-channel access with consistent security
 - Phase 7 (state) gives agents persistent context across sessions
-- Phase 8 (observability) provides visibility and alerting
+- Phase 8 remaining work: alerting on final failure, hooks-based audit logging
 
 Within each phase, work bottom-up: **models → core logic → integration → CLI/interface → tests**.
 
@@ -441,8 +474,6 @@ uv run claw run                                # smoke test end-to-end
 - Multi-agent coordination beyond Claude Code's built-in sub-agent delegation
 - OAuth token extraction or any approach that violates Anthropic's Terms of Service
 - **Intra-session scheduling or polling** — Claude Code's native `/loop` and cron tools handle this
-- **Simple per-agent memory** — Claude Code's native auto-memory handles basic persistence
-- **Named agent identities** — Agents are ephemeral; skills and projects define the work, not agent personas
 - **Skills themselves** — Skills are developed independently; the platform provides infrastructure for discovering, registering, and running them
 
 ---

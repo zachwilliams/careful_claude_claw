@@ -72,12 +72,13 @@ class PTYManager:
         session_id: SessionID,
         name: str,
         task: str,
+        cwd: str | None = None,
     ) -> PTYSession:
         """Spawn a PTY subprocess and start its background read task."""
         if session_id in self._sessions:
             raise ValueError(f"Session already exists: {session_id!r}")
 
-        proc = ptyprocess.PtyProcess.spawn(cmd)
+        proc = ptyprocess.PtyProcess.spawn(cmd, cwd=cwd)
 
         session = PTYSession(
             session_id=session_id,
@@ -87,6 +88,7 @@ class PTYManager:
             pty_name=proc.name if hasattr(proc, "name") else "",
             cmd=cmd,
             started_at=datetime.now(UTC),
+            cwd=cwd or "",
         )
 
         self._sessions[session_id] = session

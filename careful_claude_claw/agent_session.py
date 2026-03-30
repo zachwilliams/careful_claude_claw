@@ -23,6 +23,7 @@ from claude_agent_sdk import (
 
 from .db import insert_execution, register_active_agent, unregister_active_agent, update_execution
 from .models import Execution, JobStatus
+from .paths import SDK_SESSIONS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -200,9 +201,9 @@ async def run_interactive_agent(
     """
     from .agent import DEFAULT_ALLOWED_TOOLS
 
-    is_temp = cwd is None
-    workspace = Path(cwd) if cwd else Path.cwd() / "workspace" / name
+    workspace = Path(cwd) if cwd else SDK_SESSIONS_DIR / name
     workspace.mkdir(parents=True, exist_ok=True)
+    is_temp = False  # workspaces are persistent; history enables --continue
 
     execution = Execution(
         job_name=job_name,
