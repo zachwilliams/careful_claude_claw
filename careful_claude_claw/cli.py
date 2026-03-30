@@ -622,6 +622,18 @@ def wake_cmd() -> None:
     asyncio.run(_wake())
 
 
+# --- Dashboard ---
+
+
+@cli.command()
+def dashboard() -> None:
+    """Launch the Textual TUI dashboard for live agent monitoring."""
+    from .dashboard.app import DashboardApp
+
+    app = DashboardApp()
+    app.run()
+
+
 # --- Reset (dev) ---
 
 

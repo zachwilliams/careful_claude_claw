@@ -126,6 +126,15 @@ def init_db() -> None:
             "INSERT INTO orchestrator_state (id, is_awake, core_briefing, total_messages_handled) "
             "VALUES (1, 0, '', 0)"
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS token_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                recorded_at TEXT NOT NULL
+            )
+        """)
 
 
 # --- Jobs ---
@@ -514,3 +523,38 @@ def increment_message_count() -> None:
             "UPDATE orchestrator_state SET total_messages_handled = total_messages_handled + 1 "
             "WHERE id=1"
         )
+
+
+# --- Token Events ---
+
+
+def insert_token_event(
+    session_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    recorded_at: datetime,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO token_events (session_id, input_tokens, output_tokens, recorded_at) "
+            "VALUES (?, ?, ?, ?)",
+            (session_id, input_tokens, output_tokens, recorded_at.isoformat()),
+        )
+
+
+def query_token_events_since(since: datetime) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM token_events WHERE recorded_at >= ? ORDER BY recorded_at",
+            (since.isoformat(),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def query_token_events_for_session(session_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM token_events WHERE session_id=? ORDER BY recorded_at",
+            (session_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
